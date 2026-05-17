@@ -7,18 +7,20 @@ notification badges that light up panes/tabs/workspaces when an AI coding
 agent (Claude Code, Codex CLI, or any user-declared harness) finishes a turn
 or asks for input.
 
-Design and milestones: `docs/design.md` (mirrors `/home/bcorder/.claude/plans/i-want-to-use-calm-llama.md`).
+Design and milestones: `docs/design.md` (canonical, evolves with the
+project; `~/.claude/plans/i-want-to-use-calm-llama.md` is the original
+approved-plan snapshot from 2026-05-17).
 
 ## Status
 
-**M0 — scaffold.** Empty Adwaita window opens. No panes yet.
+See `PROGRESS.md` for current milestone state.
 
 ## Build
 
 System dependencies (Arch / Cachy OS):
 
 ```
-sudo pacman -S --needed gtk4 libadwaita webkitgtk-6.0 pkgconf
+sudo pacman -S --needed gtk4 libadwaita webkitgtk-6.0 vte4 pkgconf
 ```
 
 Then:

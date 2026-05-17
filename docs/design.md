@@ -25,7 +25,7 @@ The user has chosen a single monolithic spec rather than a decomposed roll-out. 
 | Target OS | Linux (developed against Arch / Cachy OS, GTK4 + WebKitGTK 6 stack) |
 | Architecture | Native GTK4 application, single Rust binary; embedded WebKitGTK browser pane |
 | Language / GUI | Rust + `gtk4-rs` |
-| Terminal renderer | `libghostty` (Zig) via Rust FFI; fallback `vte4-rs` documented but not built |
+| Terminal renderer | `vte4-rs` (GTK4 VTE binding). Swapped from `libghostty` at M0 because libghostty is not packaged as a standalone library on Arch / Cachy (Ghostty only ships its terminal binary). Documented per §13.1 escape hatch. |
 | Browser pane | `webkit6` crate (WebKitGTK 6) |
 | IPC | D-Bus session bus via `zbus`; helper binary `omux-hook` is what Claude hooks invoke |
 | Async | `glib::MainContext` for UI; `tokio` (current-thread or multi-thread) for non-UI I/O |
@@ -74,8 +74,7 @@ omux (single binary)                            omux-hook (small helper binary)
 │   └── mod.rs           applies CSS classes + maintains badge counts
 ├── ipc/
 │   └── dbus.rs          D-Bus service definition (interface name: org.omux.Status1)
-└── ffi/
-    └── ghostty.rs       libghostty bindings (build.rs links against libghostty.so)
+└── (no ffi/ — vte4-rs handles bindings)
 ```
 
 All inter-module communication for transient events goes through `glib` channels or `tokio::sync::mpsc`. Persistent state changes go through the `workspace::state` repository.
@@ -206,14 +205,13 @@ Uninstall path: `omux --uninstall-hooks` restores backup files.
 
 ## 5. Component Detail
 
-### 5.1 `pane/terminal.rs` (libghostty)
+### 5.1 `pane/terminal.rs` (vte4)
 
-- Wraps a `gtk::Widget` exposed by libghostty's GTK4 embed API.
-- Owns the PTY master fd; spawns the user's `$SHELL` with `OMUX_PANE_ID` injected.
-- Exposes a `tokio` channel for the raw PTY output stream (for `output_parser`).
-- Exposes `fg_pid()` via `tcgetpgrp` for `agent/detect`.
-
-If libghostty FFI proves unstable during M1, fall back to `vte4-rs`. This is the only documented architecture escape hatch; everything else is committed.
+- Wraps a `vte::Terminal` (GTK4 VTE widget, `vte4-rs` crate).
+- Spawns the user's `$SHELL` via `vte::Terminal::spawn_async`, injecting `OMUX_PANE_ID` into the child environment.
+- Subscribes to VTE's `contents-changed` signal and exposes a stream of new PTY output chunks (for `output_parser`).
+- Exposes `fg_pid()` via the spawned child PID + `tcgetpgrp` on VTE's pty fd, for `agent/detect`.
+- Inherits scrollback, escape-sequence parsing, mouse/selection, and copy-paste from VTE — no custom rendering code needed in v1.
 
 ### 5.2 `pane/browser.rs` (WebKitGTK)
 
@@ -329,7 +327,7 @@ Each milestone is the granularity of one ralph-loop iteration target. The loop s
 | # | Milestone | Done when |
 |---|---|---|
 | **M0** | Scaffold | `cargo new`, workspace with `omux` + `omux-hook` crates, GTK4 dep, empty window opens |
-| **M1** | Single terminal pane via libghostty | Window with one libghostty pane running `$SHELL`; if libghostty integration blocks > 1 ralph cycle, swap to `vte4-rs` and document |
+| **M1** | Single terminal pane via vte4-rs | Window with one VTE terminal pane running `$SHELL`. Decided at M0 (see §13.1 + §5.1). Requires `vte4` system package installed. |
 | **M2** | Split panes + per-pane tabs | h/v splits, tab bar in each leaf, keyboard shortcuts, drag-resize splits |
 | **M3** | Workspaces with TOML + SQLite | Sidebar, create/rename/delete/pin/reorder workspaces; layout persists across restart |
 | **M4** | Agent detection + hook + notification | Manifests load; auto-detect tags panes; first-run hook install dialog; `omux-hook` works; pane ring + badges render and clear correctly |
@@ -345,7 +343,7 @@ Stretch (not v1): tray icon, desktop libnotify integration, scrollback persisten
 ```
 Cargo.toml                           workspace manifest
 omux/Cargo.toml                      app crate
-omux/build.rs                        link libghostty
+(omux/build.rs removed — vte4 handles its own pkg-config)
 omux/src/main.rs                     bin/omux entry
 omux/src/ui/                         see §2
 omux/src/pane/
@@ -378,20 +376,21 @@ No existing repository files to reuse — `/home/bcorder/Documents/Playground/om
 | `serde`, `toml` | config + manifests |
 | `regex` | output-parser fallbacks (no backtracking, safe by default) |
 | `tracing`, `tracing-subscriber`, `tracing-appender` | structured logging |
-| `portable-pty` | PTY abstraction if libghostty's PTY isn't sufficient |
+| `vte4-rs` (`vte` crate, `v4` feature) | GTK4 VTE terminal widget |
+| `portable-pty` | PTY abstraction for headless tests / fallback PTY scenarios |
 | `directories` | XDG paths |
 | `uuid` | pane IDs |
 | `notify` | inotify watch on fallback `pending-events.jsonl` |
 | `anyhow`, `thiserror` | error types |
 | `proptest` | property tests for state machine |
 
-libghostty itself is a system library linked via `build.rs`. Build prerequisites documented in README.
+VTE4 itself is a system library; the `vte4-rs` crate's build script invokes `pkg-config` for `vte-2.91-gtk4`. Build prerequisites documented in README.
 
 ---
 
 ## 13. Open Risks
 
-1. **libghostty FFI maturity.** Documented escape hatch: switch to `vte4-rs` at M1 if blocked. No GPU rendering in that case.
+1. ~~**libghostty FFI maturity.**~~ **Resolved at M0:** libghostty is not packaged as a standalone shared library on Arch / Cachy OS (only the `ghostty` terminal binary itself is). Building Ghostty from source to extract an embeddable library is out of scope for v1. **Decision:** use `vte4-rs` (GTK4 VTE binding, `vte 0.84` system package). No GPU-rendered terminals; trades raw render perf for a battle-tested PTY+escape-sequence+scrollback widget. If GPU rendering becomes a hard requirement later, revisit by either tracking libghostty's Linux library packaging progress or evaluating `alacritty_terminal` + custom GTK draw widget.
 2. **WebKitGTK 6 packaging on Arch / Cachy.** Likely fine (system packages present) but worth a M0 smoke step that imports `webkit6` and instantiates a `WebView` in a throwaway test before committing to M5.
 3. **First-run hook merge into `~/.claude/settings.json`.** The merge is idempotent and reversible, but the user's settings might already be heavily customized. Backup-before-write + sentinel field is the mitigation; if the user declines consent, omux silently degrades to regex fallback for Claude Code.
 4. **Auto-detect race window.** If `claude` runs and finishes a turn before omux's detect-poll catches up (poll interval default 500ms), the first hook signal might arrive against an un-tagged pane. `omux-hook` always carries the pane_id explicitly from env, so the signal lands correctly regardless; the only consequence is the pane header may briefly show "Shell" instead of "Claude Code." Acceptable.
