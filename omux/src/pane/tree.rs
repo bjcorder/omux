@@ -28,6 +28,8 @@ use libadwaita::prelude::*;
 use uuid::Uuid;
 
 use super::terminal::TerminalPane;
+use crate::workspace::SnapshotOrientation;
+use crate::workspace::snapshot::{LayoutNode, LeafSnapshot, SplitSnapshot};
 
 pub type LeafId = Uuid;
 
@@ -79,16 +81,22 @@ impl Node {
 
 impl Leaf {
     fn new() -> Self {
+        Self::with_id_and_tabs(Uuid::new_v4(), 1)
+    }
+
+    fn with_id_and_tabs(id: Uuid, tab_count: usize) -> Self {
         let notebook = Notebook::builder()
             .scrollable(true)
             .show_border(false)
             .build();
         let mut leaf = Self {
-            id: Uuid::new_v4(),
+            id,
             notebook,
             tabs: Vec::new(),
         };
-        leaf.add_tab();
+        for _ in 0..tab_count.max(1) {
+            leaf.add_tab();
+        }
         leaf
     }
 
@@ -103,6 +111,10 @@ impl Leaf {
 }
 
 impl PaneTree {
+    /// Build an empty tree with a single leaf containing one tab. Use
+    /// [`PaneTree::from_snapshot`] for the production path (it handles
+    /// the single-leaf case via [`LayoutNode::single_leaf`]).
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let leaf = Leaf::new();
         let focused = leaf.id;
@@ -185,6 +197,91 @@ impl PaneTree {
         let mut out = Vec::new();
         collect_leaves_into(&self.state.borrow().root, &mut out);
         out
+    }
+
+    /// Capture the tree's current structure for persistence. PTY contents
+    /// are not part of the snapshot — only the leaf IDs, tab counts, and
+    /// split shape.
+    pub fn snapshot(&self) -> LayoutNode {
+        snapshot_slot(&self.state.borrow().root)
+    }
+
+    /// Rebuild a tree from a snapshot. Each leaf gets fresh shells.
+    pub fn from_snapshot(snapshot: &LayoutNode) -> Self {
+        let root_slot = build_from_snapshot(snapshot);
+        let focused = first_leaf_id(&root_slot);
+        let root_widget: Widget = match &*root_slot.borrow() {
+            Node::Leaf(l) => l.notebook.clone().upcast(),
+            Node::Split(s) => s.paned.clone().upcast(),
+        };
+        let bin = adw::Bin::builder().child(&root_widget).build();
+        Self {
+            bin,
+            state: Rc::new(RefCell::new(TreeState {
+                root: root_slot,
+                focused,
+            })),
+        }
+    }
+}
+
+fn snapshot_slot(slot: &NodeSlot) -> LayoutNode {
+    match &*slot.borrow() {
+        Node::Leaf(l) => LayoutNode::Leaf(LeafSnapshot {
+            id: l.id,
+            tabs: l.tabs.len().max(1),
+        }),
+        Node::Split(s) => LayoutNode::Split(SplitSnapshot {
+            orientation: SnapshotOrientation::from_gtk(s.paned.orientation()),
+            position: s.paned.position(),
+            a: Box::new(snapshot_slot(&s.a)),
+            b: Box::new(snapshot_slot(&s.b)),
+        }),
+    }
+}
+
+fn build_from_snapshot(node: &LayoutNode) -> NodeSlot {
+    match node {
+        LayoutNode::Leaf(l) => {
+            let leaf = Leaf::with_id_and_tabs(l.id, l.tabs);
+            Rc::new(RefCell::new(Node::Leaf(leaf)))
+        }
+        LayoutNode::Split(s) => {
+            let a_slot = build_from_snapshot(&s.a);
+            let b_slot = build_from_snapshot(&s.b);
+            let a_widget: Widget = match &*a_slot.borrow() {
+                Node::Leaf(l) => l.notebook.clone().upcast(),
+                Node::Split(s) => s.paned.clone().upcast(),
+            };
+            let b_widget: Widget = match &*b_slot.borrow() {
+                Node::Leaf(l) => l.notebook.clone().upcast(),
+                Node::Split(s) => s.paned.clone().upcast(),
+            };
+            let paned = Paned::builder()
+                .orientation(s.orientation.to_gtk())
+                .resize_start_child(true)
+                .resize_end_child(true)
+                .shrink_start_child(false)
+                .shrink_end_child(false)
+                .build();
+            paned.set_start_child(Some(&a_widget));
+            paned.set_end_child(Some(&b_widget));
+            if s.position > 0 {
+                paned.set_position(s.position);
+            }
+            Rc::new(RefCell::new(Node::Split(SplitNode {
+                paned,
+                a: a_slot,
+                b: b_slot,
+            })))
+        }
+    }
+}
+
+fn first_leaf_id(slot: &NodeSlot) -> Uuid {
+    match &*slot.borrow() {
+        Node::Leaf(l) => l.id,
+        Node::Split(s) => first_leaf_id(&s.a),
     }
 }
 

@@ -4,7 +4,7 @@ members = ["omux", "omux-hook"]
 
 [workspace.package]
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 authors = ["bcorder <bjcorder@protonmail.com>"]
 rust-version = "1.85"
@@ -15,7 +15,11 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+directories = "5"
 
 [profile.release]
 lto = "thin"
