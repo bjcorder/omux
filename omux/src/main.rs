@@ -46,6 +46,12 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_startup(|_| install_css());
     app.connect_activate(build_ui);
+    // Normal exit path (user closes the last window, or app.quit()
+    // fires). Removes the control socket so the next startup doesn't
+    // try to bind on top of a stale file. SIGINT/SIGTERM run the
+    // same cleanup via install_signal_handlers below; both paths are
+    // idempotent (NotFound is treated as success).
+    app.connect_shutdown(|_| cleanup_runtime_state());
     install_signal_handlers(&app);
     // Don't pass argv through; we've already consumed it for our own flags.
     app.run_with_args::<&str>(&[])
