@@ -9,7 +9,7 @@ Reference: `docs/design.md` §10.
 | **M2** | Split panes + per-pane tabs | ✅ done | Recursive `PaneTree` (leaves = `gtk::Notebook` of `TerminalPane` tabs; splits = `gtk::Paned`). Shortcuts: `Ctrl+Shift+D` h-split, `Ctrl+Shift+E` v-split, `Ctrl+T` new tab, `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle focus. Drag-resize free from `gtk::Paned`. Click-to-focus deferred to M6. |
 | **M3** | Workspaces (TOML + SQLite) | ✅ done | Persistence layer (config TOML + SQLite state) + WorkspaceManager + PaneTree snapshot/restore + Adwaita OverlaySplitView sidebar with workspace list, "New workspace" button, right-click context menu (Rename / Pin / Delete), and click-to-switch. Drag-drop reorder UI deferred to M6 polish; the reorder *backend* (`WorkspaceManager::reorder`) is implemented and unit-tested. 16 unit tests cover the persistence layer. |
 | **M4** | Agent detection + hook + notification | ✅ done | Manifests + process detection + status state machine + notification ring + Unix-socket IPC + `omux-hook` helper + first-run hook installer. Switched IPC from D-Bus to Unix domain socket at phase D (lighter dependency, integrates natively with the glib main loop via `gio::SocketService`); decision recorded in `omux/src/ipc/mod.rs`. 35 unit tests. Phase E (PTY output-regex fallback for harnesses without hooks) folded into M6 polish since Claude Code's hook path is the headline use case. |
-| **M5** | Embedded browser pane | ⏳ pending | Adds `webkit6` dep; second variant on `PaneKind` |
+| **M5** | Embedded browser pane | ✅ done | `webkit6` 0.5 dep, `BrowserPane` (WebView + URL bar + back/fwd/reload), `Pane` enum unifying Terminal + Browser in leaves, `TabSnapshot` persists per-tab kind + URL (with legacy-integer fallback), per-workspace `NetworkSession` isolating cookies/storage. `Ctrl+Shift+B` adds a browser tab to the focused leaf. 41 unit tests. |
 | **M6** | Polish | ⏳ pending | Right-click menus, animated sidebar, click-to-focus, directional Alt+arrow nav |
 
 ## Action items for user
@@ -28,6 +28,13 @@ After each milestone, the user should verify the GTK UI manually (no headless te
 5. `Ctrl+Tab` / `Ctrl+Shift+Tab` → cycle focus through leaves.
 6. Drag the divider between split panes → resize works.
 7. Run `printenv OMUX_PANE_ID` in any shell → should print a UUID unique to that pane.
+
+**M5:**
+22. `Ctrl+Shift+B` in any leaf → a browser tab appears with URL bar at `about:blank`.
+23. Type a URL (or a search query) into the bar + Enter → page loads. Bare domains autocomplete with `https://`; queries route to DuckDuckGo.
+24. Back / forward / reload buttons work, sensitive state tracks the navigation history.
+25. Close and reopen the workspace → browser tabs come back at the URLs they were on.
+26. Two workspaces each with a browser pane logged into the same site → sessions are separate (cookies live under per-workspace data dirs).
 
 **M4:**
 17. First launch shows a "Enable Claude Code notifications?" dialog. Click "Install hooks" → omux merges its Stop / Notification entries into `~/.claude/settings.json` (with a `.omux-backup` of the original). Skip and the visual ring still works for agent-running detection, just not for turn-end notifications.

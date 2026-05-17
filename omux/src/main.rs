@@ -101,6 +101,10 @@ fn install_window_shortcuts(shell: &AppShell) {
         let shell = shell.handle();
         move || shell.with_active_tree(|tree| tree.new_tab_in_focused())
     });
+    add_shortcut(&controller, "<Control><Shift>b", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.new_browser_tab_in_focused(None))
+    });
     add_shortcut(&controller, "<Control>Tab", {
         let shell = shell.handle();
         move || shell.with_active_tree(|tree| tree.focus_next_leaf())

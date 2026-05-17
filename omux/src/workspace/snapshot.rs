@@ -31,6 +31,36 @@ impl Orientation {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TabKind {
+    Terminal,
+    Browser,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabSnapshot {
+    pub kind: TabKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl TabSnapshot {
+    pub fn terminal() -> Self {
+        Self {
+            kind: TabKind::Terminal,
+            url: None,
+        }
+    }
+
+    pub fn browser(url: Option<String>) -> Self {
+        Self {
+            kind: TabKind::Browser,
+            url,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum LayoutNode {
@@ -41,14 +71,35 @@ pub enum LayoutNode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LeafSnapshot {
     pub id: Uuid,
-    /// How many tabs the leaf had. Each tab gets a fresh shell on restore
-    /// (PTYs are not persistable).
-    #[serde(default = "default_tab_count")]
-    pub tabs: usize,
+    /// Per-tab kind + url. Deserializes from either a legacy integer
+    /// (treated as N terminal tabs) or a list, so workspaces created
+    /// before M5 still load.
+    #[serde(default = "default_tabs", deserialize_with = "deserialize_tabs")]
+    pub tabs: Vec<TabSnapshot>,
 }
 
-fn default_tab_count() -> usize {
-    1
+fn default_tabs() -> Vec<TabSnapshot> {
+    vec![TabSnapshot::terminal()]
+}
+
+fn deserialize_tabs<'de, D>(deserializer: D) -> Result<Vec<TabSnapshot>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Count(usize),
+        List(Vec<TabSnapshot>),
+    }
+
+    Ok(match Either::deserialize(deserializer)? {
+        Either::Count(n) => (0..n.max(1)).map(|_| TabSnapshot::terminal()).collect(),
+        Either::List(v) if v.is_empty() => default_tabs(),
+        Either::List(v) => v,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -66,7 +117,7 @@ impl LayoutNode {
     pub fn single_leaf() -> Self {
         LayoutNode::Leaf(LeafSnapshot {
             id: Uuid::new_v4(),
-            tabs: 1,
+            tabs: default_tabs(),
         })
     }
 }
@@ -84,32 +135,55 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_nested_split() {
-        let a = LayoutNode::Leaf(LeafSnapshot {
-            id: Uuid::nil(),
-            tabs: 2,
-        });
-        let b = LayoutNode::Split(SplitSnapshot {
-            orientation: Orientation::Vertical,
-            position: 200,
-            a: Box::new(LayoutNode::Leaf(LeafSnapshot {
-                id: Uuid::from_u128(1),
-                tabs: 1,
-            })),
-            b: Box::new(LayoutNode::Leaf(LeafSnapshot {
-                id: Uuid::from_u128(2),
-                tabs: 3,
-            })),
+    fn round_trip_nested_split_with_mixed_tabs() {
+        let mixed_leaf = LayoutNode::Leaf(LeafSnapshot {
+            id: Uuid::from_u128(7),
+            tabs: vec![
+                TabSnapshot::terminal(),
+                TabSnapshot::browser(Some("https://docs.rs/".into())),
+            ],
         });
         let root = LayoutNode::Split(SplitSnapshot {
             orientation: Orientation::Horizontal,
             position: 600,
-            a: Box::new(a),
-            b: Box::new(b),
+            a: Box::new(LayoutNode::Leaf(LeafSnapshot {
+                id: Uuid::from_u128(1),
+                tabs: vec![TabSnapshot::terminal()],
+            })),
+            b: Box::new(mixed_leaf),
         });
-
         let s = toml::to_string(&root).unwrap();
         let back: LayoutNode = toml::from_str(&s).unwrap();
         assert_eq!(root, back);
+    }
+
+    #[test]
+    fn deserializes_legacy_tabs_integer() {
+        let raw = r#"
+            kind = "leaf"
+            id = "00000000-0000-0000-0000-000000000001"
+            tabs = 3
+        "#;
+        let node: LayoutNode = toml::from_str(raw).unwrap();
+        let LayoutNode::Leaf(leaf) = node else {
+            panic!("expected leaf")
+        };
+        assert_eq!(leaf.tabs.len(), 3);
+        assert!(leaf.tabs.iter().all(|t| t.kind == TabKind::Terminal));
+    }
+
+    #[test]
+    fn empty_tabs_falls_back_to_one_terminal() {
+        let raw = r#"
+            kind = "leaf"
+            id = "00000000-0000-0000-0000-000000000001"
+            tabs = []
+        "#;
+        let node: LayoutNode = toml::from_str(raw).unwrap();
+        let LayoutNode::Leaf(leaf) = node else {
+            panic!("expected leaf")
+        };
+        assert_eq!(leaf.tabs.len(), 1);
+        assert_eq!(leaf.tabs[0].kind, TabKind::Terminal);
     }
 }

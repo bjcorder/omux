@@ -27,10 +27,13 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 use uuid::Uuid;
 
+use super::Pane;
+use super::browser::BrowserPane;
 use super::terminal::TerminalPane;
 use crate::agent::manifest::CompiledManifest;
 use crate::workspace::SnapshotOrientation;
-use crate::workspace::snapshot::{LayoutNode, LeafSnapshot, SplitSnapshot};
+use crate::workspace::snapshot::{LayoutNode, LeafSnapshot, SplitSnapshot, TabKind, TabSnapshot};
+use webkit6::NetworkSession;
 
 pub type LeafId = Uuid;
 
@@ -50,6 +53,7 @@ struct TreeState {
     root: NodeSlot,
     focused: LeafId,
     manifests: Rc<Vec<CompiledManifest>>,
+    network_session: NetworkSession,
 }
 
 type NodeSlot = Rc<RefCell<Node>>;
@@ -62,7 +66,7 @@ enum Node {
 struct Leaf {
     id: LeafId,
     notebook: Notebook,
-    tabs: Vec<TerminalPane>,
+    tabs: Vec<Pane>,
 }
 
 struct SplitNode {
@@ -82,11 +86,21 @@ impl Node {
 }
 
 impl Leaf {
-    fn new(manifests: &[CompiledManifest]) -> Self {
-        Self::with_id_and_tabs(Uuid::new_v4(), 1, manifests)
+    fn new(manifests: &[CompiledManifest], session: &NetworkSession) -> Self {
+        Self::with_id_and_tabs(
+            Uuid::new_v4(),
+            &[TabSnapshot::terminal()],
+            manifests,
+            session,
+        )
     }
 
-    fn with_id_and_tabs(id: Uuid, tab_count: usize, manifests: &[CompiledManifest]) -> Self {
+    fn with_id_and_tabs(
+        id: Uuid,
+        tabs: &[TabSnapshot],
+        manifests: &[CompiledManifest],
+        session: &NetworkSession,
+    ) -> Self {
         let notebook = Notebook::builder()
             .scrollable(true)
             .show_border(false)
@@ -96,19 +110,55 @@ impl Leaf {
             notebook,
             tabs: Vec::new(),
         };
-        for _ in 0..tab_count.max(1) {
-            leaf.add_tab(manifests);
+        let specs = if tabs.is_empty() {
+            &[TabSnapshot::terminal()][..]
+        } else {
+            tabs
+        };
+        for spec in specs {
+            leaf.add_tab_from_spec(spec, manifests, session);
         }
         leaf
     }
 
-    fn add_tab(&mut self, manifests: &[CompiledManifest]) {
-        let pane = TerminalPane::new_with_manifests(manifests);
-        let label = gtk4::Label::new(Some("shell"));
+    fn add_terminal_tab(&mut self, manifests: &[CompiledManifest]) {
+        let pane = Pane::Terminal(TerminalPane::new_with_manifests(manifests));
+        self.append_pane(pane);
+    }
+
+    fn add_browser_tab(&mut self, session: &NetworkSession, url: Option<&str>) {
+        let pane = Pane::Browser(BrowserPane::new(session, url));
+        self.append_pane(pane);
+    }
+
+    fn add_tab_from_spec(
+        &mut self,
+        spec: &TabSnapshot,
+        manifests: &[CompiledManifest],
+        session: &NetworkSession,
+    ) {
+        match spec.kind {
+            TabKind::Terminal => self.add_terminal_tab(manifests),
+            TabKind::Browser => self.add_browser_tab(session, spec.url.as_deref()),
+        }
+    }
+
+    fn append_pane(&mut self, pane: Pane) {
+        let label = gtk4::Label::new(Some(pane.tab_label()));
         let idx = self.notebook.append_page(pane.widget(), Some(&label));
         self.notebook.set_current_page(Some(idx));
-        pane.terminal().grab_focus();
+        pane.grab_inner_focus();
         self.tabs.push(pane);
+    }
+
+    fn snapshot_tabs(&self) -> Vec<TabSnapshot> {
+        self.tabs
+            .iter()
+            .map(|p| match p {
+                Pane::Terminal(_) => TabSnapshot::terminal(),
+                Pane::Browser(b) => TabSnapshot::browser(b.current_url()),
+            })
+            .collect()
     }
 }
 
@@ -117,8 +167,8 @@ impl PaneTree {
     /// [`PaneTree::from_snapshot`] for the production path (it handles
     /// the single-leaf case via [`LayoutNode::single_leaf`]).
     #[allow(dead_code)]
-    pub fn new(manifests: &[CompiledManifest]) -> Self {
-        let leaf = Leaf::new(manifests);
+    pub fn new(manifests: &[CompiledManifest], network_session: NetworkSession) -> Self {
+        let leaf = Leaf::new(manifests, &network_session);
         let focused = leaf.id;
         let root_widget: Widget = leaf.notebook.clone().upcast();
         let root_slot: NodeSlot = Rc::new(RefCell::new(Node::Leaf(leaf)));
@@ -128,6 +178,7 @@ impl PaneTree {
             root: root_slot,
             focused,
             manifests: Rc::new(manifests.to_vec()),
+            network_session,
         }));
 
         Self { bin, state }
@@ -144,11 +195,18 @@ impl PaneTree {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
         let manifests = self.state.borrow().manifests.clone();
+        let session = self.state.borrow().network_session.clone();
         let bin = self.bin.clone();
 
-        if let Some(new_focus) =
-            walk_and_split(&root_slot, target, orientation, &bin, None, &manifests)
-        {
+        if let Some(new_focus) = walk_and_split(
+            &root_slot,
+            target,
+            orientation,
+            &bin,
+            None,
+            &manifests,
+            &session,
+        ) {
             self.state.borrow_mut().focused = new_focus;
         }
     }
@@ -158,7 +216,16 @@ impl PaneTree {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
         let manifests = self.state.borrow().manifests.clone();
-        let mut add = |leaf: &mut Leaf| leaf.add_tab(&manifests);
+        let mut add = |leaf: &mut Leaf| leaf.add_terminal_tab(&manifests);
+        with_leaf_mut(&root_slot, target, &mut add);
+    }
+
+    /// Append a new browser tab to the focused leaf.
+    pub fn new_browser_tab_in_focused(&self, url: Option<&str>) {
+        let target = self.state.borrow().focused;
+        let root_slot = self.state.borrow().root.clone();
+        let session = self.state.borrow().network_session.clone();
+        let mut add = |leaf: &mut Leaf| leaf.add_browser_tab(&session, url);
         with_leaf_mut(&root_slot, target, &mut add);
     }
 
@@ -208,23 +275,29 @@ impl PaneTree {
 
     /// Walk the tree and return every [`TerminalPane`] currently mounted.
     /// Used by the [`crate::ipc::SocketService`] route to populate the
-    /// pane registry whenever the active workspace changes.
+    /// pane registry whenever the active workspace changes. Browser panes
+    /// are intentionally skipped — they never produce hook events.
     pub fn terminal_panes(&self) -> Vec<TerminalPane> {
         let mut out = Vec::new();
-        collect_panes_into(&self.state.borrow().root, &mut out);
+        collect_terminal_panes_into(&self.state.borrow().root, &mut out);
         out
     }
 
     /// Capture the tree's current structure for persistence. PTY contents
-    /// are not part of the snapshot — only the leaf IDs, tab counts, and
-    /// split shape.
+    /// are not part of the snapshot — only the leaf IDs, per-tab kinds (+
+    /// URL for browser tabs), and split shape.
     pub fn snapshot(&self) -> LayoutNode {
         snapshot_slot(&self.state.borrow().root)
     }
 
-    /// Rebuild a tree from a snapshot. Each leaf gets fresh shells.
-    pub fn from_snapshot(snapshot: &LayoutNode, manifests: &[CompiledManifest]) -> Self {
-        let root_slot = build_from_snapshot(snapshot, manifests);
+    /// Rebuild a tree from a snapshot. Each leaf gets fresh shells / new
+    /// browser views loading the saved URL.
+    pub fn from_snapshot(
+        snapshot: &LayoutNode,
+        manifests: &[CompiledManifest],
+        network_session: NetworkSession,
+    ) -> Self {
+        let root_slot = build_from_snapshot(snapshot, manifests, &network_session);
         let focused = first_leaf_id(&root_slot);
         let root_widget: Widget = match &*root_slot.borrow() {
             Node::Leaf(l) => l.notebook.clone().upcast(),
@@ -237,6 +310,7 @@ impl PaneTree {
                 root: root_slot,
                 focused,
                 manifests: Rc::new(manifests.to_vec()),
+                network_session,
             })),
         }
     }
@@ -246,7 +320,7 @@ fn snapshot_slot(slot: &NodeSlot) -> LayoutNode {
     match &*slot.borrow() {
         Node::Leaf(l) => LayoutNode::Leaf(LeafSnapshot {
             id: l.id,
-            tabs: l.tabs.len().max(1),
+            tabs: l.snapshot_tabs(),
         }),
         Node::Split(s) => LayoutNode::Split(SplitSnapshot {
             orientation: SnapshotOrientation::from_gtk(s.paned.orientation()),
@@ -257,15 +331,19 @@ fn snapshot_slot(slot: &NodeSlot) -> LayoutNode {
     }
 }
 
-fn build_from_snapshot(node: &LayoutNode, manifests: &[CompiledManifest]) -> NodeSlot {
+fn build_from_snapshot(
+    node: &LayoutNode,
+    manifests: &[CompiledManifest],
+    session: &NetworkSession,
+) -> NodeSlot {
     match node {
         LayoutNode::Leaf(l) => {
-            let leaf = Leaf::with_id_and_tabs(l.id, l.tabs, manifests);
+            let leaf = Leaf::with_id_and_tabs(l.id, &l.tabs, manifests, session);
             Rc::new(RefCell::new(Node::Leaf(leaf)))
         }
         LayoutNode::Split(s) => {
-            let a_slot = build_from_snapshot(&s.a, manifests);
-            let b_slot = build_from_snapshot(&s.b, manifests);
+            let a_slot = build_from_snapshot(&s.a, manifests, session);
+            let b_slot = build_from_snapshot(&s.b, manifests, session);
             let a_widget: Widget = match &*a_slot.borrow() {
                 Node::Leaf(l) => l.notebook.clone().upcast(),
                 Node::Split(s) => s.paned.clone().upcast(),
@@ -312,16 +390,18 @@ fn collect_leaves_into(slot: &NodeSlot, out: &mut Vec<LeafId>) {
     }
 }
 
-fn collect_panes_into(slot: &NodeSlot, out: &mut Vec<TerminalPane>) {
+fn collect_terminal_panes_into(slot: &NodeSlot, out: &mut Vec<TerminalPane>) {
     match &*slot.borrow() {
         Node::Leaf(l) => {
             for pane in &l.tabs {
-                out.push(pane.clone());
+                if let Some(t) = pane.as_terminal() {
+                    out.push(t.clone());
+                }
             }
         }
         Node::Split(s) => {
-            collect_panes_into(&s.a, out);
-            collect_panes_into(&s.b, out);
+            collect_terminal_panes_into(&s.a, out);
+            collect_terminal_panes_into(&s.b, out);
         }
     }
 }
@@ -360,6 +440,7 @@ fn walk_and_split(
     root_bin: &adw::Bin,
     parent: Option<(Paned, ChildSlot)>,
     manifests: &[CompiledManifest],
+    session: &NetworkSession,
 ) -> Option<LeafId> {
     // Probe what kind of node we're looking at without holding the borrow during recursion.
     let action = match &*slot.borrow() {
@@ -380,6 +461,7 @@ fn walk_and_split(
             root_bin,
             Some((paned.clone(), ChildSlot::Start)),
             manifests,
+            session,
         )
         .or_else(|| {
             walk_and_split(
@@ -389,11 +471,12 @@ fn walk_and_split(
                 root_bin,
                 Some((paned, ChildSlot::End)),
                 manifests,
+                session,
             )
         }),
         Action::SplitHere => {
             // Build the new structure outside the borrow.
-            let new_leaf = Leaf::new(manifests);
+            let new_leaf = Leaf::new(manifests, session);
             let new_leaf_id = new_leaf.id;
             let paned = Paned::builder()
                 .orientation(orientation)

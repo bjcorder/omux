@@ -398,7 +398,8 @@ fn switch_workspace(
         .get(name)
         .and_then(|e| e.config.layout.clone())
         .unwrap_or_else(LayoutNode::single_leaf);
-    let tree = PaneTree::from_snapshot(&layout, manifests);
+    let session = build_network_session(name);
+    let tree = PaneTree::from_snapshot(&layout, manifests, session);
     content_bin.set_child(Some(tree.widget()));
 
     // 3. Update manager + active record.
@@ -406,6 +407,47 @@ fn switch_workspace(
         tracing::warn!(error = %e, "set_active failed");
     }
     *active.borrow_mut() = Some((name.to_string(), tree));
+}
+
+/// Build a per-workspace WebKit `NetworkSession` whose data + cache live
+/// under `$XDG_DATA_HOME/omux/web/<slug>/` and `…/cache/<slug>/`. That
+/// gives each workspace its own cookies / local storage / etc.
+fn build_network_session(workspace_name: &str) -> webkit6::NetworkSession {
+    let slug = slugify_for_dir(workspace_name);
+    let data_dir = crate::workspace::paths::config_dir()
+        .map(|d| d.parent().map(|p| p.to_path_buf()).unwrap_or(d))
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("omux")
+        .join("web")
+        .join(&slug);
+    let cache_dir = data_dir.join("cache");
+    let _ = std::fs::create_dir_all(&data_dir);
+    let _ = std::fs::create_dir_all(&cache_dir);
+    webkit6::NetworkSession::new(
+        Some(&data_dir.to_string_lossy()),
+        Some(&cache_dir.to_string_lossy()),
+    )
+}
+
+fn slugify_for_dir(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_dash = false;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("workspace");
+    }
+    out
 }
 
 fn save_active_layout(
