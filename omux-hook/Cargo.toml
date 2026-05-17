@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Helper invoked by agent harness hooks to signal omux via D-Bus"
+description = "Helper invoked by agent harness hooks to signal omux via a Unix socket"
 
 [[bin]]
 name = "omux-hook"
@@ -18,3 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 directories.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }
