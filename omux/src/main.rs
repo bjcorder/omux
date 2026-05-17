@@ -17,6 +17,7 @@ use gtk4::{CallbackAction, Orientation, Shortcut, ShortcutController, ShortcutTr
 use libadwaita as adw;
 
 use agent::manifest::{self, CompiledManifest};
+use pane::tree::Direction;
 use ui::AppShell;
 use workspace::WorkspaceManager;
 
@@ -165,6 +166,22 @@ fn install_window_shortcuts(shell: &AppShell) {
     add_shortcut(&controller, "<Control><Shift>Tab", {
         let shell = shell.handle();
         move || shell.with_active_tree(|tree| tree.focus_prev_leaf())
+    });
+    add_shortcut(&controller, "<Alt>Left", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.focus_in_direction(Direction::Left))
+    });
+    add_shortcut(&controller, "<Alt>Right", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.focus_in_direction(Direction::Right))
+    });
+    add_shortcut(&controller, "<Alt>Up", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.focus_in_direction(Direction::Up))
+    });
+    add_shortcut(&controller, "<Alt>Down", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.focus_in_direction(Direction::Down))
     });
     add_shortcut(&controller, "<Control><Shift>c", {
         let shell = shell.handle();

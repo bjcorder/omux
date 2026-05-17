@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4 as gtk;
+use gtk4::gdk;
+use gtk4::glib;
 use gtk4::prelude::*;
 
 pub struct WorkspaceRowData {
@@ -169,6 +171,7 @@ impl Sidebar {
 
             let row = gtk::ListBoxRow::builder().child(&hbox).build();
             install_row_context_menu(&row, &entry.name, &self.callbacks);
+            install_row_drag_drop(&row, &entry.name, &self.order, &self.callbacks);
             self.list_box.append(&row);
             rows.insert(entry.name.clone(), row);
             self.badges.borrow_mut().insert(entry.name.clone(), badge);
@@ -303,4 +306,63 @@ fn build_row_menu() -> gtk::gio::Menu {
     menu.append(Some("Pin / unpin"), Some("row.pin-toggle"));
     menu.append(Some("Delete…"), Some("row.delete"));
     menu
+}
+
+/// Wire `gtk::DragSource` + `gtk::DropTarget` on a sidebar row so the
+/// user can drag workspaces to reorder them. The reorder is propagated
+/// to the manager via the `on_reorder` callback the shell installs.
+fn install_row_drag_drop(
+    row: &gtk::ListBoxRow,
+    name: &str,
+    order: &Rc<RefCell<Vec<String>>>,
+    callbacks: &Rc<RefCell<Callbacks>>,
+) {
+    // ── Source ────────────────────────────────────────────────────
+    let source = gtk::DragSource::new();
+    source.set_actions(gdk::DragAction::MOVE);
+    let name_for_source = name.to_string();
+    source.connect_prepare(move |_, _, _| {
+        Some(gdk::ContentProvider::for_value(&name_for_source.to_value()))
+    });
+    // Fade the row visually while it's the drag source.
+    let row_for_begin = row.clone();
+    source.connect_drag_begin(move |_, _| {
+        row_for_begin.add_css_class("dragging");
+    });
+    let row_for_end = row.clone();
+    source.connect_drag_end(move |_, _, _| {
+        row_for_end.remove_css_class("dragging");
+    });
+    row.add_controller(source);
+
+    // ── Target ────────────────────────────────────────────────────
+    let target = gtk::DropTarget::new(glib::types::Type::STRING, gdk::DragAction::MOVE);
+    let dest_name = name.to_string();
+    let order = order.clone();
+    let callbacks = callbacks.clone();
+    target.connect_drop(move |_, value, _x, _y| {
+        let Ok(src_name) = value.get::<String>() else {
+            return false;
+        };
+        if src_name == dest_name {
+            return false;
+        }
+        let mut current = order.borrow().clone();
+        let Some(src_idx) = current.iter().position(|n| n == &src_name) else {
+            return false;
+        };
+        let Some(mut dst_idx) = current.iter().position(|n| n == &dest_name) else {
+            return false;
+        };
+        let item = current.remove(src_idx);
+        if src_idx < dst_idx {
+            dst_idx -= 1;
+        }
+        current.insert(dst_idx, item);
+        if let Some(cb) = callbacks.borrow().on_reorder.as_ref() {
+            cb(current);
+        }
+        true
+    });
+    row.add_controller(target);
 }

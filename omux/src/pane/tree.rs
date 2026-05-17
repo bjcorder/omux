@@ -58,10 +58,32 @@ fn make_tab_label(text: &str) -> (gtk::Box, gtk::Image) {
 
 pub type LeafId = Uuid;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ChildSlot {
     Start,
     End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// One ancestor of a leaf, recorded by [`path_to_leaf`]. Ordered
+/// nearest-ancestor-first.
+struct PathStep {
+    split_slot: NodeSlot,
+    came_from: ChildSlot,
+    orientation: gtk::Orientation,
+}
+
+impl PathStep {
+    fn came_from_matches(&self, side: ChildSlot) -> bool {
+        self.came_from == side
+    }
 }
 
 #[derive(Clone)]
@@ -332,6 +354,48 @@ impl PaneTree {
         self.set_focus(leaves[prev]);
     }
 
+    /// Focus the adjacent leaf in a cardinal direction (tmux-style
+    /// `Alt+Arrow` nav). Walks up the tree from the current leaf until
+    /// it finds a split with the matching orientation + descent direction,
+    /// then descends extreme-side into the sibling.
+    pub fn focus_in_direction(&self, dir: Direction) {
+        let current = self.state.borrow().focused;
+        let root = self.state.borrow().root.clone();
+        let Some(path) = path_to_leaf(&root, current) else {
+            return;
+        };
+        let (want_orientation, want_came_from, descend_extreme) = match dir {
+            Direction::Right => (
+                gtk::Orientation::Horizontal,
+                ChildSlot::Start,
+                ChildSlot::Start,
+            ),
+            Direction::Left => (gtk::Orientation::Horizontal, ChildSlot::End, ChildSlot::End),
+            Direction::Down => (
+                gtk::Orientation::Vertical,
+                ChildSlot::Start,
+                ChildSlot::Start,
+            ),
+            Direction::Up => (gtk::Orientation::Vertical, ChildSlot::End, ChildSlot::End),
+        };
+        for step in &path {
+            if step.orientation == want_orientation && step.came_from_matches(want_came_from) {
+                // Switch to the other child, then descend extreme-side to a leaf.
+                let Node::Split(s) = &*step.split_slot.borrow() else {
+                    continue;
+                };
+                let sibling = match want_came_from {
+                    ChildSlot::Start => s.b.clone(),
+                    ChildSlot::End => s.a.clone(),
+                };
+                if let Some(target) = extreme_leaf_id(&sibling, descend_extreme) {
+                    self.set_focus(target);
+                }
+                return;
+            }
+        }
+    }
+
     fn set_focus(&self, target: LeafId) {
         let root_slot = self.state.borrow().root.clone();
         let mut grab = |leaf: &mut Leaf| {
@@ -546,6 +610,47 @@ fn first_leaf_id(slot: &NodeSlot) -> Uuid {
         Node::Leaf(l) => l.id,
         Node::Split(s) => first_leaf_id(&s.a),
     }
+}
+
+/// Descend the subtree at `slot` always to the `side` child, returning
+/// the LeafId we land on. `side == Start` gives the topmost/leftmost
+/// leaf, `End` gives the bottommost/rightmost.
+fn extreme_leaf_id(slot: &NodeSlot, side: ChildSlot) -> Option<Uuid> {
+    match &*slot.borrow() {
+        Node::Leaf(l) => Some(l.id),
+        Node::Split(s) => match side {
+            ChildSlot::Start => extreme_leaf_id(&s.a, side),
+            ChildSlot::End => extreme_leaf_id(&s.b, side),
+        },
+    }
+}
+
+/// Build the ancestor chain from the given leaf back up to the root.
+/// Returned vec is ordered closest-ancestor first.
+fn path_to_leaf(slot: &NodeSlot, target: LeafId) -> Option<Vec<PathStep>> {
+    let probe = match &*slot.borrow() {
+        Node::Leaf(l) if l.id == target => return Some(Vec::new()),
+        Node::Leaf(_) => return None,
+        Node::Split(s) => (s.a.clone(), s.b.clone(), s.paned.orientation()),
+    };
+    let (a, b, orientation) = probe;
+    if let Some(mut path) = path_to_leaf(&a, target) {
+        path.push(PathStep {
+            split_slot: slot.clone(),
+            came_from: ChildSlot::Start,
+            orientation,
+        });
+        return Some(path);
+    }
+    if let Some(mut path) = path_to_leaf(&b, target) {
+        path.push(PathStep {
+            split_slot: slot.clone(),
+            came_from: ChildSlot::End,
+            orientation,
+        });
+        return Some(path);
+    }
+    None
 }
 
 /// Find the [`NodeSlot`] of a specific leaf, returning a clone of the

@@ -329,6 +329,16 @@ impl AppShell {
             refresh_sidebar(&manager, &sidebar);
         });
 
+        // on_reorder → persist + refresh
+        let manager = self.manager.clone();
+        let sidebar = self.sidebar.clone();
+        self.sidebar.on_reorder(move |names_in_order| {
+            if let Err(e) = manager.borrow_mut().reorder(&names_in_order) {
+                tracing::warn!(error = %e, "reorder failed");
+            }
+            refresh_sidebar(&manager, &sidebar);
+        });
+
         // Window close → snapshot active.
         let manager = self.manager.clone();
         let active = self.active.clone();
