@@ -137,6 +137,8 @@ fn load_compiled_manifests() -> Vec<CompiledManifest> {
 }
 
 fn install_window_shortcuts(shell: &AppShell) {
+    install_window_actions(shell);
+
     let controller = ShortcutController::new();
     controller.set_scope(gtk4::ShortcutScope::Global);
 
@@ -164,8 +166,62 @@ fn install_window_shortcuts(shell: &AppShell) {
         let shell = shell.handle();
         move || shell.with_active_tree(|tree| tree.focus_prev_leaf())
     });
+    add_shortcut(&controller, "<Control><Shift>c", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.copy_active_selection())
+    });
+    add_shortcut(&controller, "<Control><Shift>v", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.paste_to_active())
+    });
+    add_shortcut(&controller, "<Control>w", {
+        let shell = shell.handle();
+        move || {
+            shell.with_active_tree(|tree| {
+                let _ = tree.close_focused_tab();
+            });
+        }
+    });
 
     shell.window_for_shortcuts().add_controller(controller);
+}
+
+/// Install window-level GAction handlers for the entries the pane
+/// context menu binds to (`win.split-h`, `win.split-v`, `win.new-tab`,
+/// `win.close-tab`).
+fn install_window_actions(shell: &AppShell) {
+    use gtk4::gio;
+    let window = shell.window_for_shortcuts();
+
+    let split_h = gio::SimpleAction::new("split-h", None);
+    let shell_h = shell.handle();
+    split_h.connect_activate(move |_, _| {
+        shell_h.with_active_tree(|tree| tree.split(Orientation::Horizontal));
+    });
+    window.add_action(&split_h);
+
+    let split_v = gio::SimpleAction::new("split-v", None);
+    let shell_v = shell.handle();
+    split_v.connect_activate(move |_, _| {
+        shell_v.with_active_tree(|tree| tree.split(Orientation::Vertical));
+    });
+    window.add_action(&split_v);
+
+    let new_tab = gio::SimpleAction::new("new-tab", None);
+    let shell_t = shell.handle();
+    new_tab.connect_activate(move |_, _| {
+        shell_t.with_active_tree(|tree| tree.new_tab_in_focused());
+    });
+    window.add_action(&new_tab);
+
+    let close_tab = gio::SimpleAction::new("close-tab", None);
+    let shell_c = shell.handle();
+    close_tab.connect_activate(move |_, _| {
+        shell_c.with_active_tree(|tree| {
+            let _ = tree.close_focused_tab();
+        });
+    });
+    window.add_action(&close_tab);
 }
 
 fn add_shortcut<F>(controller: &ShortcutController, accel: &str, f: F)

@@ -42,6 +42,8 @@ pub struct Sidebar {
     root: gtk::Box,
     list_box: gtk::ListBox,
     rows: Rc<RefCell<HashMap<String, gtk::ListBoxRow>>>,
+    /// Needs-attention count label per workspace name. Hidden when zero.
+    badges: Rc<RefCell<HashMap<String, gtk::Label>>>,
     /// Names in the visible (display) order.
     order: Rc<RefCell<Vec<String>>>,
     callbacks: Rc<RefCell<Callbacks>>,
@@ -81,6 +83,7 @@ impl Sidebar {
             root,
             list_box,
             rows: Rc::new(RefCell::new(HashMap::new())),
+            badges: Rc::new(RefCell::new(HashMap::new())),
             order: Rc::new(RefCell::new(Vec::new())),
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
             suppress_select: Rc::new(RefCell::new(false)),
@@ -134,6 +137,7 @@ impl Sidebar {
             self.list_box.remove(row);
         }
         rows.clear();
+        self.badges.borrow_mut().clear();
         self.order.borrow_mut().clear();
 
         for entry in entries {
@@ -141,6 +145,11 @@ impl Sidebar {
                 .label(&entry.name)
                 .xalign(0.0)
                 .hexpand(true)
+                .build();
+            let badge = gtk::Label::builder()
+                .label("")
+                .css_classes(["sidebar-badge"])
+                .visible(false)
                 .build();
             let hbox = gtk::Box::builder()
                 .orientation(gtk::Orientation::Horizontal)
@@ -156,15 +165,30 @@ impl Sidebar {
                 hbox.append(&pin);
             }
             hbox.append(&label);
+            hbox.append(&badge);
 
             let row = gtk::ListBoxRow::builder().child(&hbox).build();
             install_row_context_menu(&row, &entry.name, &self.callbacks);
             self.list_box.append(&row);
             rows.insert(entry.name.clone(), row);
+            self.badges.borrow_mut().insert(entry.name.clone(), badge);
             self.order.borrow_mut().push(entry.name.clone());
         }
 
         *self.suppress_select.borrow_mut() = false;
+    }
+
+    /// Set the unread-count badge for a workspace row. `0` hides it.
+    pub fn set_workspace_badge(&self, name: &str, count: usize) {
+        if let Some(label) = self.badges.borrow().get(name) {
+            if count == 0 {
+                label.set_visible(false);
+                label.set_text("");
+            } else {
+                label.set_visible(true);
+                label.set_text(&count.to_string());
+            }
+        }
     }
 
     pub fn set_active(&self, name: Option<&str>) {

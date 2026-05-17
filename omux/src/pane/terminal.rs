@@ -93,12 +93,76 @@ impl TerminalPane {
         };
 
         me.install_focus_clear();
+        me.install_context_menu();
         if !manifests.is_empty() {
             me.start_polling(manifests.to_vec());
         }
         me.apply_status_class();
 
         me
+    }
+
+    /// Build a `gio::Menu` of pane actions and bind it to the terminal
+    /// widget as its context menu. Action handlers are installed on a
+    /// `term.*` action group scoped to this pane's terminal widget; the
+    /// shell layer separately installs `term.split-h` / `term.split-v` /
+    /// `term.new-tab` / `term.close-tab` on the window so the shortcut
+    /// path stays unified.
+    fn install_context_menu(&self) {
+        let menu = gio::Menu::new();
+        let edit_section = gio::Menu::new();
+        edit_section.append(Some("Copy"), Some("term.copy"));
+        edit_section.append(Some("Paste"), Some("term.paste"));
+        edit_section.append(Some("Clear"), Some("term.clear"));
+        menu.append_section(None, &edit_section);
+
+        let pane_section = gio::Menu::new();
+        pane_section.append(Some("Split horizontally"), Some("win.split-h"));
+        pane_section.append(Some("Split vertically"), Some("win.split-v"));
+        pane_section.append(Some("New tab"), Some("win.new-tab"));
+        pane_section.append(Some("Close tab"), Some("win.close-tab"));
+        menu.append_section(None, &pane_section);
+
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        self.terminal.set_context_menu(Some(&popover));
+
+        // Terminal-local actions (copy/paste/clear).
+        let actions = gio::SimpleActionGroup::new();
+
+        let term = self.terminal.clone();
+        let copy = gio::SimpleAction::new("copy", None);
+        copy.connect_activate(move |_, _| {
+            term.copy_clipboard_format(Format::Text);
+        });
+        actions.add_action(&copy);
+
+        let term = self.terminal.clone();
+        let paste = gio::SimpleAction::new("paste", None);
+        paste.connect_activate(move |_, _| {
+            term.paste_clipboard();
+        });
+        actions.add_action(&paste);
+
+        let term = self.terminal.clone();
+        let clear = gio::SimpleAction::new("clear", None);
+        clear.connect_activate(move |_, _| {
+            term.reset(true, true);
+        });
+        actions.add_action(&clear);
+
+        self.terminal.insert_action_group("term", Some(&actions));
+    }
+
+    /// Copy the current terminal selection (or visible buffer) to the
+    /// system clipboard. Bound to `Ctrl+Shift+C` from the shell layer.
+    pub fn copy_selection(&self) {
+        self.terminal.copy_clipboard_format(Format::Text);
+    }
+
+    /// Paste from the system clipboard into the terminal. Bound to
+    /// `Ctrl+Shift+V` from the shell layer.
+    pub fn paste_clipboard(&self) {
+        self.terminal.paste_clipboard();
     }
 
     pub fn widget(&self) -> &gtk::Frame {

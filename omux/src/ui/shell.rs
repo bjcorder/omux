@@ -105,10 +105,33 @@ impl AppShell {
         shell.refresh_sidebar();
         shell.wire_callbacks();
         shell.start_socket_service();
+        shell.start_badge_refresh_timer();
         shell.restore_initial_workspace();
         shell.maybe_show_hook_install_dialog();
 
         shell
+    }
+
+    /// Every 250 ms, walk the active workspace's PaneTree and sync each
+    /// tab + sidebar badge to the corresponding pane status. Cheap; the
+    /// alternative (status-change callbacks routed through every pane)
+    /// adds threading-style complexity without measurable UX win.
+    fn start_badge_refresh_timer(&self) {
+        use crate::agent::status::PaneStatus;
+        let active = self.active.clone();
+        let sidebar = self.sidebar.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            if let Some((name, tree)) = active.borrow().as_ref() {
+                tree.refresh_badges();
+                let count = tree
+                    .terminal_panes()
+                    .iter()
+                    .filter(|t| t.status() == PaneStatus::NeedsAttention)
+                    .count();
+                sidebar.set_workspace_badge(name, count);
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     fn maybe_show_hook_install_dialog(&self) {

@@ -32,9 +32,29 @@ use super::Pane;
 use super::browser::BrowserPane;
 use super::terminal::TerminalPane;
 use crate::agent::manifest::CompiledManifest;
+use crate::agent::status::PaneStatus;
 use crate::workspace::SnapshotOrientation;
 use crate::workspace::snapshot::{LayoutNode, LeafSnapshot, SplitSnapshot, TabKind, TabSnapshot};
 use webkit6::NetworkSession;
+
+/// Build the per-tab label widget: a small notification dot (initially
+/// hidden) followed by the pane's text label. Returns the outer widget
+/// (attached to the Notebook) and the Image used as the badge.
+fn make_tab_label(text: &str) -> (gtk::Box, gtk::Image) {
+    let badge = gtk::Image::from_icon_name("emblem-important-symbolic");
+    badge.set_pixel_size(10);
+    badge.add_css_class("tab-needs-attention");
+    badge.set_tooltip_text(Some("Agent needs attention"));
+    badge.set_visible(false);
+    let label = gtk::Label::new(Some(text));
+    let hbox = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .build();
+    hbox.append(&badge);
+    hbox.append(&label);
+    (hbox, badge)
+}
 
 pub type LeafId = Uuid;
 
@@ -68,6 +88,9 @@ struct Leaf {
     id: LeafId,
     notebook: Notebook,
     tabs: Vec<Pane>,
+    /// One `tab-badge` Image per tab, parallel to `tabs`. Hidden while
+    /// the tab's pane is in any state other than `NeedsAttention`.
+    tab_badges: Vec<gtk::Image>,
 }
 
 struct SplitNode {
@@ -110,6 +133,7 @@ impl Leaf {
             id,
             notebook,
             tabs: Vec::new(),
+            tab_badges: Vec::new(),
         };
         let specs = if tabs.is_empty() {
             &[TabSnapshot::terminal()][..]
@@ -145,11 +169,45 @@ impl Leaf {
     }
 
     fn append_pane(&mut self, pane: Pane) {
-        let label = gtk4::Label::new(Some(pane.tab_label()));
-        let idx = self.notebook.append_page(pane.widget(), Some(&label));
+        let (tab_widget, badge) = make_tab_label(pane.tab_label());
+        let idx = self.notebook.append_page(pane.widget(), Some(&tab_widget));
         self.notebook.set_current_page(Some(idx));
         pane.grab_inner_focus();
         self.tabs.push(pane);
+        self.tab_badges.push(badge);
+    }
+
+    /// Close the currently selected tab. Refuses if it's the last tab
+    /// in the leaf (the leaf would have no panes; we defer collapsing
+    /// to a future iteration that handles split rewiring).
+    fn close_current_tab(&mut self) -> bool {
+        if self.tabs.len() <= 1 {
+            return false;
+        }
+        let Some(idx) = self.notebook.current_page() else {
+            return false;
+        };
+        let idx = idx as usize;
+        if idx >= self.tabs.len() {
+            return false;
+        }
+        self.notebook.remove_page(Some(idx as u32));
+        self.tabs.remove(idx);
+        self.tab_badges.remove(idx);
+        true
+    }
+
+    /// Sync each tab's badge visibility to its pane's current status.
+    fn refresh_tab_badges(&self) {
+        for (pane, badge) in self.tabs.iter().zip(self.tab_badges.iter()) {
+            let want_visible = match pane {
+                Pane::Terminal(t) => t.status() == PaneStatus::NeedsAttention,
+                Pane::Browser(_) => false,
+            };
+            if badge.is_visible() != want_visible {
+                badge.set_visible(want_visible);
+            }
+        }
     }
 
     fn snapshot_tabs(&self) -> Vec<TabSnapshot> {
@@ -301,6 +359,58 @@ impl PaneTree {
     pub fn terminal_panes(&self) -> Vec<TerminalPane> {
         let mut out = Vec::new();
         collect_terminal_panes_into(&self.state.borrow().root, &mut out);
+        out
+    }
+
+    /// Walk every leaf and ensure each tab's badge reflects the current
+    /// status of its pane. Called from a polling timer in the shell.
+    pub fn refresh_badges(&self) {
+        refresh_badges_in_slot(&self.state.borrow().root);
+    }
+
+    /// Close the focused leaf's currently active tab, if more than one
+    /// tab remains. Returns true if a tab was closed.
+    pub fn close_focused_tab(&self) -> bool {
+        let target = self.state.borrow().focused;
+        let root_slot = self.state.borrow().root.clone();
+        let mut closed = false;
+        let mut close = |leaf: &mut Leaf| {
+            closed = leaf.close_current_tab();
+        };
+        with_leaf_mut(&root_slot, target, &mut close);
+        closed
+    }
+
+    /// Copy the active terminal's selection.
+    pub fn copy_active_selection(&self) {
+        if let Some(pane) = self.focused_active_pane()
+            && let Pane::Terminal(t) = &pane
+        {
+            t.copy_selection();
+        }
+    }
+
+    /// Paste into the active terminal.
+    pub fn paste_to_active(&self) {
+        if let Some(pane) = self.focused_active_pane()
+            && let Pane::Terminal(t) = &pane
+        {
+            t.paste_clipboard();
+        }
+    }
+
+    fn focused_active_pane(&self) -> Option<Pane> {
+        let target = self.state.borrow().focused;
+        let root_slot = self.state.borrow().root.clone();
+        let mut out: Option<Pane> = None;
+        let mut grab = |leaf: &mut Leaf| {
+            if let Some(idx) = leaf.notebook.current_page() {
+                if let Some(p) = leaf.tabs.get(idx as usize) {
+                    out = Some(p.clone());
+                }
+            }
+        };
+        with_leaf_mut(&root_slot, target, &mut grab);
         out
     }
 
@@ -475,6 +585,16 @@ fn collect_terminal_panes_into(slot: &NodeSlot, out: &mut Vec<TerminalPane>) {
     }
 }
 
+fn refresh_badges_in_slot(slot: &NodeSlot) {
+    match &*slot.borrow() {
+        Node::Leaf(l) => l.refresh_tab_badges(),
+        Node::Split(s) => {
+            refresh_badges_in_slot(&s.a);
+            refresh_badges_in_slot(&s.b);
+        }
+    }
+}
+
 fn with_leaf_mut<F>(slot: &NodeSlot, target: LeafId, f: &mut F) -> bool
 where
     F: FnMut(&mut Leaf) + ?Sized,
@@ -582,6 +702,7 @@ fn walk_and_split(
                         id: Uuid::nil(),
                         notebook: Notebook::new(),
                         tabs: Vec::new(),
+                        tab_badges: Vec::new(),
                     }))),
                     b: Rc::new(RefCell::new(Node::Leaf(new_leaf))),
                 }),
