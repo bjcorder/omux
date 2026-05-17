@@ -3,13 +3,17 @@
 //! `AppShell` glues together:
 //! * the [`WorkspaceManager`] (persistence),
 //! * the [`Sidebar`] widget (UI mirror of the workspace list),
-//! * a single live [`PaneTree`] mounted in an `adw::Bin` (the content area),
+//! * a map of live [`PaneTree`]s — one per workspace the user has
+//!   opened in this session — and the currently-mounted one,
 //! * the dialogs for create / rename / delete.
 //!
-//! Only one workspace's PaneTree is alive at a time. Switching snapshots
-//! the current tree, persists it, and rebuilds the target from its saved
-//! layout. PTY state is not preserved across switches (this is the cost of
-//! the "one live tree" model; see design.md §1).
+//! Live-tree map: each workspace's tree is kept alive across switches so
+//! terminals (running shells, scrollback, agent state) and browser pages
+//! survive when the user clicks away and back. Trees are dropped only
+//! when their workspace is deleted or the app exits. The original
+//! design.md §1 "one live tree" model was a wrong call — it killed the
+//! shells on every switch — so we widened to the map model after the
+//! first round of live smoke testing.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -36,6 +40,7 @@ use crate::workspace::snapshot::LayoutNode;
 use super::sidebar::{Sidebar, WorkspaceRowData};
 
 type PaneRegistry = Rc<RefCell<HashMap<Uuid, TerminalPane>>>;
+type LiveTrees = Rc<RefCell<HashMap<String, PaneTree>>>;
 
 const DEFAULT_WORKSPACE_NAME: &str = "default";
 
@@ -45,7 +50,14 @@ pub struct AppShell {
     manager: Rc<RefCell<WorkspaceManager>>,
     sidebar: Sidebar,
     content_bin: adw::Bin,
-    active: Rc<RefCell<Option<(String, PaneTree)>>>,
+    /// All workspace trees that have been opened at least once during
+    /// this session. Kept alive so switching workspaces preserves their
+    /// terminals (running shells, scrollback, agent state, browser
+    /// history). Dropped when the workspace is deleted or the app exits.
+    trees: LiveTrees,
+    /// Name of the currently mounted workspace, or `None` if no
+    /// workspaces exist.
+    active_name: Rc<RefCell<Option<String>>>,
     manifests: Rc<Vec<CompiledManifest>>,
     pane_registry: PaneRegistry,
     socket_service: Rc<RefCell<Option<SocketService>>>,
@@ -86,7 +98,8 @@ impl AppShell {
         toolbar.set_content(Some(&split));
         window.set_content(Some(&toolbar));
 
-        let active: Rc<RefCell<Option<(String, PaneTree)>>> = Rc::new(RefCell::new(None));
+        let trees: LiveTrees = Rc::new(RefCell::new(HashMap::new()));
+        let active_name: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let pane_registry: PaneRegistry = Rc::new(RefCell::new(HashMap::new()));
         let socket_service: Rc<RefCell<Option<SocketService>>> = Rc::new(RefCell::new(None));
 
@@ -95,7 +108,8 @@ impl AppShell {
             manager,
             sidebar,
             content_bin,
-            active,
+            trees,
+            active_name,
             manifests,
             pane_registry,
             socket_service,
@@ -123,31 +137,38 @@ impl AppShell {
     /// without measurable UX win.
     fn start_badge_refresh_timer(&self) {
         use crate::agent::status::PaneStatus;
-        let active = self.active.clone();
+        let active_name = self.active_name.clone();
+        let trees = self.trees.clone();
         let sidebar = self.sidebar.clone();
         let registry = self.pane_registry.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            if let Some((name, tree)) = active.borrow().as_ref() {
-                tree.refresh_badges();
-                let panes = tree.terminal_panes();
+            let active = active_name.borrow().clone();
+            let Some(name) = active else {
+                return glib::ControlFlow::Continue;
+            };
+            let trees_ref = trees.borrow();
+            let Some(tree) = trees_ref.get(&name) else {
+                return glib::ControlFlow::Continue;
+            };
+            tree.refresh_badges();
+            let panes = tree.terminal_panes();
 
-                // Reconcile registry with the live tree:
-                // remove pane_ids that no longer exist, add any new ones.
-                let mut reg = registry.borrow_mut();
-                let live_ids: std::collections::HashSet<Uuid> =
-                    panes.iter().map(|p| p.pane_id()).collect();
-                reg.retain(|id, _| live_ids.contains(id));
-                for p in &panes {
-                    reg.entry(p.pane_id()).or_insert_with(|| p.clone());
-                }
-                drop(reg);
-
-                let count = panes
-                    .iter()
-                    .filter(|t| t.status() == PaneStatus::NeedsAttention)
-                    .count();
-                sidebar.set_workspace_badge(name, count);
+            // Reconcile registry with the live tree.
+            let mut reg = registry.borrow_mut();
+            let live_ids: std::collections::HashSet<Uuid> =
+                panes.iter().map(|p| p.pane_id()).collect();
+            reg.retain(|id, _| live_ids.contains(id));
+            for p in &panes {
+                reg.entry(p.pane_id()).or_insert_with(|| p.clone());
             }
+            drop(reg);
+
+            let count = panes
+                .iter()
+                .filter(|t| t.status() == PaneStatus::NeedsAttention)
+                .count();
+            sidebar.set_workspace_badge(&name, count);
+
             glib::ControlFlow::Continue
         });
     }
@@ -216,16 +237,6 @@ impl AppShell {
         }
     }
 
-    fn refresh_pane_registry(&self) {
-        let mut registry = self.pane_registry.borrow_mut();
-        registry.clear();
-        if let Some((_, tree)) = self.active.borrow().as_ref() {
-            for pane in tree.terminal_panes() {
-                registry.insert(pane.pane_id(), pane);
-            }
-        }
-    }
-
     pub fn present(&self) {
         self.window.present();
     }
@@ -242,7 +253,11 @@ impl AppShell {
 
     /// Run `f` against the currently mounted PaneTree, if any.
     pub fn with_active_tree<F: FnOnce(&PaneTree)>(&self, f: F) {
-        if let Some((_, tree)) = self.active.borrow().as_ref() {
+        let Some(name) = self.active_name.borrow().clone() else {
+            return;
+        };
+        let trees = self.trees.borrow();
+        if let Some(tree) = trees.get(&name) {
             f(tree);
         }
     }
@@ -278,18 +293,27 @@ impl AppShell {
     fn wire_callbacks(&self) {
         // on_select → switch workspace
         let manager = self.manager.clone();
-        let active = self.active.clone();
+        let trees = self.trees.clone();
+        let active_name = self.active_name.clone();
         let content_bin = self.content_bin.clone();
         let sidebar = self.sidebar.clone();
         let manifests = self.manifests.clone();
         self.sidebar.on_select(move |name| {
-            switch_workspace(&manager, &active, &content_bin, name, &manifests);
+            switch_workspace(
+                &manager,
+                &trees,
+                &active_name,
+                &content_bin,
+                name,
+                &manifests,
+            );
             sidebar.set_active(Some(name));
         });
 
         // on_new → "new workspace" dialog
         let manager = self.manager.clone();
-        let active = self.active.clone();
+        let trees = self.trees.clone();
+        let active_name = self.active_name.clone();
         let content_bin = self.content_bin.clone();
         let sidebar = self.sidebar.clone();
         let window = self.window.clone();
@@ -298,7 +322,8 @@ impl AppShell {
             show_new_workspace_dialog(
                 &window,
                 manager.clone(),
-                active.clone(),
+                trees.clone(),
+                active_name.clone(),
                 content_bin.clone(),
                 sidebar.clone(),
                 manifests.clone(),
@@ -307,15 +332,25 @@ impl AppShell {
 
         // on_rename → rename dialog
         let manager = self.manager.clone();
+        let trees = self.trees.clone();
+        let active_name = self.active_name.clone();
         let sidebar = self.sidebar.clone();
         let window = self.window.clone();
         self.sidebar.on_rename(move |old, _placeholder| {
-            show_rename_dialog(&window, manager.clone(), sidebar.clone(), old.to_string());
+            show_rename_dialog(
+                &window,
+                manager.clone(),
+                trees.clone(),
+                active_name.clone(),
+                sidebar.clone(),
+                old.to_string(),
+            );
         });
 
         // on_delete → confirm + delete
         let manager = self.manager.clone();
-        let active = self.active.clone();
+        let trees = self.trees.clone();
+        let active_name = self.active_name.clone();
         let content_bin = self.content_bin.clone();
         let sidebar = self.sidebar.clone();
         let window = self.window.clone();
@@ -324,7 +359,8 @@ impl AppShell {
             show_delete_dialog(
                 &window,
                 manager.clone(),
-                active.clone(),
+                trees.clone(),
+                active_name.clone(),
                 content_bin.clone(),
                 sidebar.clone(),
                 name.to_string(),
@@ -357,11 +393,11 @@ impl AppShell {
             refresh_sidebar(&manager, &sidebar);
         });
 
-        // Window close → snapshot active.
+        // Window close → snapshot every live tree (so the layouts persist).
         let manager = self.manager.clone();
-        let active = self.active.clone();
+        let trees = self.trees.clone();
         self.window.connect_close_request(move |_| {
-            save_active_layout(&manager, &active);
+            persist_all_layouts(&manager, &trees);
             glib::Propagation::Proceed
         });
     }
@@ -369,13 +405,13 @@ impl AppShell {
     fn switch_to(&self, name: &str) {
         switch_workspace(
             &self.manager,
-            &self.active,
+            &self.trees,
+            &self.active_name,
             &self.content_bin,
             name,
             &self.manifests,
         );
         self.sidebar.set_active(Some(name));
-        self.refresh_pane_registry();
     }
 }
 
@@ -433,31 +469,40 @@ fn refresh_sidebar(manager: &Rc<RefCell<WorkspaceManager>>, sidebar: &Sidebar) {
     sidebar.set_active(manager.borrow().active_workspace_name());
 }
 
+/// Mount the target workspace's tree in the content bin. Reuses any
+/// already-live tree from `trees` so terminal state (running shells,
+/// scrollback, browser history) survives workspace switches. Only the
+/// first time a workspace is opened does it get built from its saved
+/// snapshot.
 fn switch_workspace(
     manager: &Rc<RefCell<WorkspaceManager>>,
-    active: &Rc<RefCell<Option<(String, PaneTree)>>>,
+    trees: &LiveTrees,
+    active_name: &Rc<RefCell<Option<String>>>,
     content_bin: &adw::Bin,
     name: &str,
     manifests: &Rc<Vec<CompiledManifest>>,
 ) {
-    // 1. Snapshot the currently active tree (if any) and persist its layout.
-    save_active_layout(manager, active);
+    // Get or build the target's tree.
+    let tree_widget = {
+        let mut map = trees.borrow_mut();
+        let entry = map.entry(name.to_string()).or_insert_with(|| {
+            let layout = manager
+                .borrow()
+                .get(name)
+                .and_then(|e| e.config.layout.clone())
+                .unwrap_or_else(LayoutNode::single_leaf);
+            let session = build_network_session(name);
+            PaneTree::from_snapshot(&layout, manifests, session)
+        });
+        entry.widget().clone()
+    };
 
-    // 2. Build the target's tree from its saved layout (or a fresh leaf).
-    let layout = manager
-        .borrow()
-        .get(name)
-        .and_then(|e| e.config.layout.clone())
-        .unwrap_or_else(LayoutNode::single_leaf);
-    let session = build_network_session(name);
-    let tree = PaneTree::from_snapshot(&layout, manifests, session);
-    content_bin.set_child(Some(tree.widget()));
+    content_bin.set_child(Some(&tree_widget));
 
-    // 3. Update manager + active record.
     if let Err(e) = manager.borrow_mut().set_active(Some(name)) {
         tracing::warn!(error = %e, "set_active failed");
     }
-    *active.borrow_mut() = Some((name.to_string(), tree));
+    *active_name.borrow_mut() = Some(name.to_string());
 }
 
 /// Build a per-workspace WebKit `NetworkSession` whose data + cache live
@@ -501,27 +546,29 @@ fn slugify_for_dir(s: &str) -> String {
     out
 }
 
-fn save_active_layout(
-    manager: &Rc<RefCell<WorkspaceManager>>,
-    active: &Rc<RefCell<Option<(String, PaneTree)>>>,
-) {
-    let Some((name, tree)) = active.borrow().clone() else {
-        return;
-    };
-    let snapshot = tree.snapshot();
-    let Some(mut cfg) = manager.borrow().get(&name).map(|e| e.config.clone()) else {
-        return;
-    };
-    cfg.layout = Some(snapshot);
-    if let Err(e) = manager.borrow_mut().upsert(cfg) {
-        tracing::warn!(error = %e, workspace = %name, "could not persist layout");
+/// Snapshot every live workspace's tree and persist its current layout.
+/// Called on window close so each workspace's split shape, tab kinds,
+/// and browser URLs survive across app restarts.
+fn persist_all_layouts(manager: &Rc<RefCell<WorkspaceManager>>, trees: &LiveTrees) {
+    let trees_ref = trees.borrow();
+    for (name, tree) in trees_ref.iter() {
+        let snapshot = tree.snapshot();
+        let Some(mut cfg) = manager.borrow().get(name).map(|e| e.config.clone()) else {
+            continue;
+        };
+        cfg.layout = Some(snapshot);
+        if let Err(e) = manager.borrow_mut().upsert(cfg) {
+            tracing::warn!(error = %e, workspace = %name, "could not persist layout");
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_new_workspace_dialog(
     parent: &adw::ApplicationWindow,
     manager: Rc<RefCell<WorkspaceManager>>,
-    active: Rc<RefCell<Option<(String, PaneTree)>>>,
+    trees: LiveTrees,
+    active_name: Rc<RefCell<Option<String>>>,
     content_bin: adw::Bin,
     sidebar: Sidebar,
     manifests: Rc<Vec<CompiledManifest>>,
@@ -567,7 +614,14 @@ fn show_new_workspace_dialog(
         let cfg = WorkspaceConfig::new(&name, cwd);
         match manager.borrow_mut().upsert(cfg) {
             Ok(()) => {
-                switch_workspace(&manager, &active, &content_bin, &name, &manifests);
+                switch_workspace(
+                    &manager,
+                    &trees,
+                    &active_name,
+                    &content_bin,
+                    &name,
+                    &manifests,
+                );
                 refresh_sidebar(&manager, &sidebar);
             }
             Err(e) => {
@@ -584,6 +638,8 @@ fn show_new_workspace_dialog(
 fn show_rename_dialog(
     parent: &adw::ApplicationWindow,
     manager: Rc<RefCell<WorkspaceManager>>,
+    trees: LiveTrees,
+    active_name: Rc<RefCell<Option<String>>>,
     sidebar: Sidebar,
     old: String,
 ) {
@@ -612,6 +668,15 @@ fn show_rename_dialog(
             tracing::warn!(error = %e, "rename failed");
             show_error_dialog(&parent_for_cb, &format!("Could not rename: {e}"));
         } else {
+            // Move the live tree to the new name so it stays mounted.
+            let mut trees_mut = trees.borrow_mut();
+            if let Some(tree) = trees_mut.remove(&old) {
+                trees_mut.insert(new.clone(), tree);
+            }
+            drop(trees_mut);
+            if active_name.borrow().as_deref() == Some(old.as_str()) {
+                *active_name.borrow_mut() = Some(new.clone());
+            }
             refresh_sidebar(&manager, &sidebar);
         }
         dialog.close();
@@ -620,10 +685,12 @@ fn show_rename_dialog(
     dialog.present(Some(parent));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_delete_dialog(
     parent: &adw::ApplicationWindow,
     manager: Rc<RefCell<WorkspaceManager>>,
-    active: Rc<RefCell<Option<(String, PaneTree)>>>,
+    trees: LiveTrees,
+    active_name: Rc<RefCell<Option<String>>>,
     content_bin: adw::Bin,
     sidebar: Sidebar,
     name: String,
@@ -652,8 +719,10 @@ fn show_delete_dialog(
             dialog.close();
             return;
         }
+        // Drop the deleted workspace's tree (kills its shells).
+        trees.borrow_mut().remove(&name);
         if was_active {
-            *active.borrow_mut() = None;
+            *active_name.borrow_mut() = None;
             content_bin.set_child(gtk::Widget::NONE);
             // Pick a new active workspace if any remain.
             let next = manager
@@ -662,7 +731,14 @@ fn show_delete_dialog(
                 .first()
                 .map(|e| e.config.name.clone());
             if let Some(next) = next {
-                switch_workspace(&manager, &active, &content_bin, &next, &manifests);
+                switch_workspace(
+                    &manager,
+                    &trees,
+                    &active_name,
+                    &content_bin,
+                    &next,
+                    &manifests,
+                );
             }
         }
         refresh_sidebar(&manager, &sidebar);

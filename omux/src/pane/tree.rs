@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use gtk4 as gtk;
+use gtk4::gio;
 use gtk4::prelude::*;
 use gtk4::{Notebook, Orientation, Paned, Widget};
 use libadwaita as adw;
@@ -37,23 +38,61 @@ use crate::workspace::SnapshotOrientation;
 use crate::workspace::snapshot::{LayoutNode, LeafSnapshot, SplitSnapshot, TabKind, TabSnapshot};
 use webkit6::NetworkSession;
 
-/// Build the per-tab label widget: a small notification dot (initially
-/// hidden) followed by the pane's text label. Returns the outer widget
-/// (attached to the Notebook) and the Image used as the badge.
-fn make_tab_label(text: &str) -> (gtk::Box, gtk::Image) {
+/// Attach a `+` MenuButton to the right side of the Notebook's tab
+/// bar. Clicking it opens a popover with "New terminal tab" / "New
+/// browser tab" entries. The actions live on the `leaf.*` action group
+/// installed per-leaf by [`install_focus_in_slot`].
+fn attach_new_tab_button(notebook: &Notebook) {
+    let menu = gio::Menu::new();
+    menu.append(Some("New terminal tab"), Some("leaf.new-terminal"));
+    menu.append(Some("New browser tab"), Some("leaf.new-browser"));
+
+    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+    let btn = gtk::MenuButton::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add tab")
+        .popover(&popover)
+        .css_classes(["flat", "leaf-add-tab"])
+        .build();
+
+    notebook.set_action_widget(&btn, gtk::PackType::End);
+}
+
+/// Build the per-tab label widget:
+///
+/// ```text
+///   [ ! ] shell  [ × ]
+///    ^badge       ^close
+/// ```
+///
+/// The badge is hidden until the pane needs attention. The close button
+/// fires `clicked` events but has no handler attached here — the
+/// post-construction install walk wires it up so the handler can capture
+/// a Weak<RefCell<TreeState>> for removal.
+fn make_tab_label(text: &str) -> (gtk::Box, gtk::Image, gtk::Button) {
     let badge = gtk::Image::from_icon_name("emblem-important-symbolic");
     badge.set_pixel_size(10);
     badge.add_css_class("tab-needs-attention");
     badge.set_tooltip_text(Some("Agent needs attention"));
     badge.set_visible(false);
+
     let label = gtk::Label::new(Some(text));
+
+    let close_btn = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .tooltip_text("Close tab")
+        .css_classes(["flat", "tab-close"])
+        .build();
+    close_btn.set_can_focus(false);
+
     let hbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(4)
         .build();
     hbox.append(&badge);
     hbox.append(&label);
-    (hbox, badge)
+    hbox.append(&close_btn);
+    (hbox, badge, close_btn)
 }
 
 pub type LeafId = Uuid;
@@ -113,6 +152,10 @@ struct Leaf {
     /// One `tab-badge` Image per tab, parallel to `tabs`. Hidden while
     /// the tab's pane is in any state other than `NeedsAttention`.
     tab_badges: Vec<gtk::Image>,
+    /// One close (`×`) Button per tab, parallel to `tabs`. The button's
+    /// `clicked` handler is wired during the post-construction install
+    /// walk (where the tree state Weak ref is available).
+    tab_close_buttons: Vec<gtk::Button>,
 }
 
 struct SplitNode {
@@ -151,11 +194,13 @@ impl Leaf {
             .scrollable(true)
             .show_border(false)
             .build();
+        attach_new_tab_button(&notebook);
         let mut leaf = Self {
             id,
             notebook,
             tabs: Vec::new(),
             tab_badges: Vec::new(),
+            tab_close_buttons: Vec::new(),
         };
         let specs = if tabs.is_empty() {
             &[TabSnapshot::terminal()][..]
@@ -191,31 +236,34 @@ impl Leaf {
     }
 
     fn append_pane(&mut self, pane: Pane) {
-        let (tab_widget, badge) = make_tab_label(pane.tab_label());
+        let (tab_widget, badge, close_btn) = make_tab_label(pane.tab_label());
         let idx = self.notebook.append_page(pane.widget(), Some(&tab_widget));
         self.notebook.set_current_page(Some(idx));
         pane.grab_inner_focus();
         self.tabs.push(pane);
         self.tab_badges.push(badge);
+        self.tab_close_buttons.push(close_btn);
     }
 
     /// Close the currently selected tab. Refuses if it's the last tab
     /// in the leaf (the leaf would have no panes; we defer collapsing
     /// to a future iteration that handles split rewiring).
     fn close_current_tab(&mut self) -> bool {
-        if self.tabs.len() <= 1 {
-            return false;
-        }
         let Some(idx) = self.notebook.current_page() else {
             return false;
         };
-        let idx = idx as usize;
-        if idx >= self.tabs.len() {
+        self.close_tab_at(idx as usize)
+    }
+
+    /// Close the tab at the given index. Refuses if it's the last tab.
+    fn close_tab_at(&mut self, idx: usize) -> bool {
+        if self.tabs.len() <= 1 || idx >= self.tabs.len() {
             return false;
         }
         self.notebook.remove_page(Some(idx as u32));
         self.tabs.remove(idx);
         self.tab_badges.remove(idx);
+        self.tab_close_buttons.remove(idx);
         true
     }
 
@@ -308,9 +356,7 @@ impl PaneTree {
         let state_weak = Rc::downgrade(&self.state);
         let mut add = |leaf: &mut Leaf| {
             leaf.add_terminal_tab(&manifests);
-            if let Some(p) = leaf.tabs.last() {
-                install_focus_tracking(p, leaf.id, &state_weak);
-            }
+            wire_last_pane(leaf, &state_weak);
         };
         with_leaf_mut(&root_slot, target, &mut add);
     }
@@ -323,9 +369,7 @@ impl PaneTree {
         let state_weak = Rc::downgrade(&self.state);
         let mut add = |leaf: &mut Leaf| {
             leaf.add_browser_tab(&session, url);
-            if let Some(p) = leaf.tabs.last() {
-                install_focus_tracking(p, leaf.id, &state_weak);
-            }
+            wire_last_pane(leaf, &state_weak);
         };
         with_leaf_mut(&root_slot, target, &mut add);
     }
@@ -527,11 +571,112 @@ fn install_focus_in_slot(slot: &NodeSlot, state_weak: &Weak<RefCell<TreeState>>)
             for pane in &l.tabs {
                 install_focus_tracking(pane, l.id, state_weak);
             }
+            install_leaf_actions(l, state_weak);
+            install_close_buttons(l, state_weak);
         }
         Node::Split(s) => {
             install_focus_in_slot(&s.a, state_weak);
             install_focus_in_slot(&s.b, state_weak);
         }
+    }
+}
+
+/// Wire each tab's `×` close button to remove its pane.
+fn install_close_buttons(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
+    let leaf_id = leaf.id;
+    for (pane, button) in leaf.tabs.iter().zip(leaf.tab_close_buttons.iter()) {
+        // Skip if already wired (idempotent for re-walks after split).
+        if button.observe_controllers().n_items() > 0 {
+            continue;
+        }
+        let pane_id = pane.pane_id();
+        let state_weak = state_weak.clone();
+        button.connect_clicked(move |_| {
+            if let Some(state) = state_weak.upgrade() {
+                close_tab_by_pane(&state, leaf_id, pane_id);
+            }
+        });
+    }
+}
+
+fn close_tab_by_pane(state: &Rc<RefCell<TreeState>>, leaf_id: LeafId, pane_id: Uuid) {
+    let root_slot = state.borrow().root.clone();
+    let mut close = |leaf: &mut Leaf| {
+        if let Some(idx) = leaf.tabs.iter().position(|p| p.pane_id() == pane_id) {
+            let _ = leaf.close_tab_at(idx);
+        }
+    };
+    with_leaf_mut(&root_slot, leaf_id, &mut close);
+}
+
+/// Install the `leaf.new-terminal` and `leaf.new-browser` actions on
+/// this leaf's notebook. The popover menu attached to the leaf's
+/// `+` MenuButton references these via `leaf.*` so each leaf's button
+/// adds tabs to *itself*, not to whichever leaf is currently focused.
+fn install_leaf_actions(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
+    let actions = gio::SimpleActionGroup::new();
+    let leaf_id = leaf.id;
+
+    let state_for_term = state_weak.clone();
+    let new_term = gio::SimpleAction::new("new-terminal", None);
+    new_term.connect_activate(move |_, _| {
+        if let Some(state) = state_for_term.upgrade() {
+            add_terminal_tab_in_leaf(&state, leaf_id);
+        }
+    });
+    actions.add_action(&new_term);
+
+    let state_for_browser = state_weak.clone();
+    let new_browser = gio::SimpleAction::new("new-browser", None);
+    new_browser.connect_activate(move |_, _| {
+        if let Some(state) = state_for_browser.upgrade() {
+            add_browser_tab_in_leaf(&state, leaf_id);
+        }
+    });
+    actions.add_action(&new_browser);
+
+    leaf.notebook.insert_action_group("leaf", Some(&actions));
+}
+
+fn add_terminal_tab_in_leaf(state: &Rc<RefCell<TreeState>>, target: LeafId) {
+    let root_slot = state.borrow().root.clone();
+    let manifests = state.borrow().manifests.clone();
+    let state_weak = Rc::downgrade(state);
+    let mut add = |leaf: &mut Leaf| {
+        leaf.add_terminal_tab(&manifests);
+        wire_last_pane(leaf, &state_weak);
+    };
+    with_leaf_mut(&root_slot, target, &mut add);
+}
+
+fn add_browser_tab_in_leaf(state: &Rc<RefCell<TreeState>>, target: LeafId) {
+    let root_slot = state.borrow().root.clone();
+    let session = state.borrow().network_session.clone();
+    let state_weak = Rc::downgrade(state);
+    let mut add = |leaf: &mut Leaf| {
+        leaf.add_browser_tab(&session, None);
+        wire_last_pane(leaf, &state_weak);
+    };
+    with_leaf_mut(&root_slot, target, &mut add);
+}
+
+/// Helper called after `add_terminal_tab` / `add_browser_tab` to attach
+/// focus tracking AND the close button click handler to the just-added
+/// pane. The leaf-level action group (for the `+` button) is per-leaf
+/// and was installed once at construction time, so it doesn't need
+/// re-installing here.
+fn wire_last_pane(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
+    let Some(p) = leaf.tabs.last() else { return };
+    install_focus_tracking(p, leaf.id, state_weak);
+    if let Some(btn) = leaf.tab_close_buttons.last() {
+        let leaf_id = leaf.id;
+        let pane_id = p.pane_id();
+        let state_weak = state_weak.clone();
+        btn.connect_clicked(move |_| {
+            if let Some(state) = state_weak.upgrade() {
+                close_tab_by_pane(&state, leaf_id, pane_id);
+            }
+        });
     }
 }
 
@@ -808,6 +953,7 @@ fn walk_and_split(
                         notebook: Notebook::new(),
                         tabs: Vec::new(),
                         tab_badges: Vec::new(),
+                        tab_close_buttons: Vec::new(),
                     }))),
                     b: Rc::new(RefCell::new(Node::Leaf(new_leaf))),
                 }),

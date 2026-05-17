@@ -44,6 +44,16 @@ impl Pane {
         }
     }
 
+    /// The stable id used to address this pane in the IPC registry and
+    /// in close-by-id paths. For terminal panes this is what the agent
+    /// hook environment exports as `OMUX_PANE_ID`.
+    pub fn pane_id(&self) -> uuid::Uuid {
+        match self {
+            Pane::Terminal(t) => t.pane_id(),
+            Pane::Browser(b) => b.pane_id(),
+        }
+    }
+
     pub fn as_terminal(&self) -> Option<&TerminalPane> {
         match self {
             Pane::Terminal(t) => Some(t),

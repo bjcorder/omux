@@ -50,6 +50,31 @@
   opacity: 0.4;
 }
 
+/* Per-tab close (`×`) button. Smaller + lower contrast than other
+ * controls so it doesn't fight the tab label for attention. */
+button.tab-close {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  -gtk-icon-size: 10px;
+  opacity: 0.55;
+}
+button.tab-close:hover {
+  opacity: 1.0;
+}
+
+/* The per-leaf `+` MenuButton at the right end of the tab bar. */
+button.leaf-add-tab {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0 4px;
+  opacity: 0.7;
+}
+button.leaf-add-tab:hover {
+  opacity: 1.0;
+}
+
 /* Browser pane URL bar: slightly inset look so it reads as part of
  * the navigation row rather than the page. */
 .browser-url {
