@@ -84,16 +84,26 @@ impl AppShell {
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
 
-        // Sidebar + content split.
+        // Sidebar + content split. `gtk::Paned` (rather than
+        // `adw::OverlaySplitView`) so the divider is user-draggable —
+        // the workspace labels are short and most users want the
+        // sidebar narrower than Adwaita's default.
         let sidebar = Sidebar::new();
         let content_bin = adw::Bin::new();
-        let split = adw::OverlaySplitView::builder()
-            .sidebar(sidebar.widget())
-            .content(&content_bin)
-            .min_sidebar_width(180.0)
-            .max_sidebar_width(280.0)
-            .show_sidebar(true)
+        let split = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .start_child(sidebar.widget())
+            .end_child(&content_bin)
+            // Sidebar keeps its width on window resize; only content grows.
+            .resize_start_child(false)
+            .resize_end_child(true)
+            // Allow shrinking down to children's natural minimum.
+            .shrink_start_child(false)
+            .shrink_end_child(false)
+            .position(140)
             .build();
+        // Persist the user's chosen width across restarts.
+        wire_sidebar_width_persistence(&split, &manager);
 
         toolbar.set_content(Some(&split));
         window.set_content(Some(&toolbar));
@@ -435,6 +445,48 @@ fn deliver_event(registry: &PaneRegistry, event: HookEvent) {
             );
         }
     }
+}
+
+/// Wire the gtk::Paned divider's position to a persisted key in the
+/// app's state DB. Reads the stored value (if any) and applies it
+/// asynchronously after the widget is realized; saves the new value
+/// whenever the user drags the divider.
+fn wire_sidebar_width_persistence(paned: &gtk::Paned, manager: &Rc<RefCell<WorkspaceManager>>) {
+    const KEY: &str = "sidebar_width";
+
+    // Restore.
+    if let Ok(Some(value)) = manager.borrow().app_state_get(KEY)
+        && let Ok(px) = value.parse::<i32>()
+        && px > 0
+    {
+        // glib::idle_add_local because position must be set after
+        // initial allocation; otherwise GTK overrides our position
+        // with its computed default.
+        let paned_w = paned.clone();
+        glib::idle_add_local_once(move || {
+            paned_w.set_position(px);
+        });
+    }
+
+    // Save on change. notify::position fires on every drag pixel —
+    // throttle by waiting until the user pauses (500 ms after the
+    // last change).
+    let manager = manager.clone();
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    paned.connect_position_notify(move |p| {
+        let pos = p.position();
+        // Cancel the previous pending save.
+        if let Some(id) = pending.borrow_mut().take() {
+            id.remove();
+        }
+        let manager = manager.clone();
+        let pending_for_clear = pending.clone();
+        let id = glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+            let _ = manager.borrow().app_state_set(KEY, &pos.to_string());
+            pending_for_clear.borrow_mut().take();
+        });
+        *pending.borrow_mut() = Some(id);
+    });
 }
 
 fn ensure_default_workspace(manager: &Rc<RefCell<WorkspaceManager>>) {

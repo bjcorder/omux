@@ -210,6 +210,16 @@ impl WorkspaceManager {
         Ok(())
     }
 
+    /// Read a generic UI-state key from the SQLite store.
+    pub fn app_state_get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        self.repo.app_state_get(key)
+    }
+
+    /// Write a generic UI-state key to the SQLite store.
+    pub fn app_state_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.repo.app_state_set(key, value)
+    }
+
     pub fn set_active(&mut self, name: Option<&str>) -> anyhow::Result<()> {
         self.active = name.map(|s| s.to_string());
         self.repo.set_active_workspace(name)?;

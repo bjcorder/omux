@@ -142,6 +142,30 @@ impl StateRepo {
         }
         Ok(())
     }
+
+    /// Generic key/value store on the `app_state` table. Used for UI
+    /// state that doesn't deserve its own column (sidebar width, last
+    /// selected pane, etc).
+    pub fn app_state_get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let v = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(v)
+    }
+
+    pub fn app_state_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
