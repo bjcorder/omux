@@ -13,5 +13,6 @@
 //!   without hooks (per design §3.3 manifest `fallback` block).
 
 pub mod detect;
+pub mod hook_installer;
 pub mod manifest;
 pub mod status;

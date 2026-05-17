@@ -12,6 +12,7 @@
 //! the "one live tree" model; see design.md §1).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -20,14 +21,21 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
+use uuid::Uuid;
 
+use crate::agent::hook_installer;
 use crate::agent::manifest::CompiledManifest;
+use crate::agent::status::StatusEvent;
+use crate::ipc::{HookEvent, HookEventKind, SocketService};
+use crate::pane::terminal::TerminalPane;
 use crate::pane::tree::PaneTree;
 use crate::workspace::WorkspaceConfig;
 use crate::workspace::WorkspaceManager;
 use crate::workspace::snapshot::LayoutNode;
 
 use super::sidebar::{Sidebar, WorkspaceRowData};
+
+type PaneRegistry = Rc<RefCell<HashMap<Uuid, TerminalPane>>>;
 
 const DEFAULT_WORKSPACE_NAME: &str = "default";
 
@@ -39,6 +47,8 @@ pub struct AppShell {
     content_bin: adw::Bin,
     active: Rc<RefCell<Option<(String, PaneTree)>>>,
     manifests: Rc<Vec<CompiledManifest>>,
+    pane_registry: PaneRegistry,
+    socket_service: Rc<RefCell<Option<SocketService>>>,
 }
 
 impl AppShell {
@@ -77,6 +87,8 @@ impl AppShell {
         window.set_content(Some(&toolbar));
 
         let active: Rc<RefCell<Option<(String, PaneTree)>>> = Rc::new(RefCell::new(None));
+        let pane_registry: PaneRegistry = Rc::new(RefCell::new(HashMap::new()));
+        let socket_service: Rc<RefCell<Option<SocketService>>> = Rc::new(RefCell::new(None));
 
         let shell = Self {
             window,
@@ -85,14 +97,92 @@ impl AppShell {
             content_bin,
             active,
             manifests,
+            pane_registry,
+            socket_service,
         };
 
         ensure_default_workspace(&shell.manager);
         shell.refresh_sidebar();
         shell.wire_callbacks();
+        shell.start_socket_service();
         shell.restore_initial_workspace();
+        shell.maybe_show_hook_install_dialog();
 
         shell
+    }
+
+    fn maybe_show_hook_install_dialog(&self) {
+        if hook_installer::already_installed() {
+            return;
+        }
+        let body_text = match hook_installer::settings_path() {
+            Some(p) => format!(
+                "omux can install Stop and Notification hooks into your Claude Code settings ({}) so panes light up when Claude finishes a turn or needs input. The original file will be backed up to <…>.omux-backup.",
+                p.display(),
+            ),
+            None => "omux could not resolve $HOME; the hook install is unavailable on this system."
+                .to_string(),
+        };
+        let dialog =
+            adw::AlertDialog::new(Some("Enable Claude Code notifications?"), Some(&body_text));
+        dialog.add_responses(&[("skip", "Not now"), ("install", "Install hooks")]);
+        dialog.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("install"));
+        dialog.set_close_response("skip");
+
+        let window = self.window.clone();
+        dialog.connect_response(None, move |dialog, resp| {
+            if resp == "install" {
+                match hook_installer::install() {
+                    Ok(result) if result.installed_now => {
+                        tracing::info!(
+                            backup = %result.backup_path.display(),
+                            "installed Claude Code hooks",
+                        );
+                        show_info(
+                            &window,
+                            "Hooks installed",
+                            "Claude Code will now notify omux when a turn ends.",
+                        );
+                    }
+                    Ok(_) => {
+                        tracing::info!("hooks already present; nothing to install");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "hook install failed");
+                        show_info(&window, "Couldn't install hooks", &format!("Reason: {e}"));
+                    }
+                }
+            }
+            dialog.close();
+        });
+
+        dialog.present(Some(&self.window));
+    }
+
+    fn start_socket_service(&self) {
+        let registry = self.pane_registry.clone();
+        let handler: crate::ipc::socket_service::EventHandler = Rc::new(move |event: HookEvent| {
+            deliver_event(&registry, event);
+        });
+
+        // Drain any events buffered while omux wasn't running.
+        SocketService::drain_pending(&handler);
+
+        match SocketService::start(handler) {
+            Ok(service) => *self.socket_service.borrow_mut() = Some(service),
+            Err(e) => tracing::warn!(error = %e, "could not start control socket"),
+        }
+    }
+
+    fn refresh_pane_registry(&self) {
+        let mut registry = self.pane_registry.borrow_mut();
+        registry.clear();
+        if let Some((_, tree)) = self.active.borrow().as_ref() {
+            for pane in tree.terminal_panes() {
+                registry.insert(pane.pane_id(), pane);
+            }
+        }
     }
 
     pub fn present(&self) {
@@ -234,6 +324,29 @@ impl AppShell {
             &self.manifests,
         );
         self.sidebar.set_active(Some(name));
+        self.refresh_pane_registry();
+    }
+}
+
+fn deliver_event(registry: &PaneRegistry, event: HookEvent) {
+    let pane = registry.borrow().get(&event.pane_id).cloned();
+    match pane {
+        Some(p) => {
+            let status_event = match event.kind {
+                HookEventKind::Stop
+                | HookEventKind::Notification
+                | HookEventKind::RegexFallback => StatusEvent::AttentionRequested,
+                HookEventKind::SessionStart => StatusEvent::AgentStarted,
+            };
+            p.apply_status_event(status_event);
+        }
+        None => {
+            tracing::debug!(
+                pane_id = %event.pane_id,
+                kind = ?event.kind,
+                "hook event for unknown pane (workspace probably switched away)",
+            );
+        }
     }
 }
 
@@ -467,7 +580,11 @@ fn show_delete_dialog(
 }
 
 fn show_error_dialog(parent: &adw::ApplicationWindow, message: &str) {
-    let dialog = adw::AlertDialog::new(Some("Something went wrong"), Some(message));
+    show_info(parent, "Something went wrong", message);
+}
+
+fn show_info(parent: &adw::ApplicationWindow, title: &str, message: &str) {
+    let dialog = adw::AlertDialog::new(Some(title), Some(message));
     dialog.add_responses(&[("ok", "OK")]);
     dialog.set_default_response(Some("ok"));
     dialog.set_close_response("ok");

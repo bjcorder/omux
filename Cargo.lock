@@ -714,6 +714,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "toml 0.8.23",
  "tracing",
@@ -727,6 +728,10 @@ name = "omux-hook"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "directories",
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

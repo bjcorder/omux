@@ -206,6 +206,15 @@ impl PaneTree {
         out
     }
 
+    /// Walk the tree and return every [`TerminalPane`] currently mounted.
+    /// Used by the [`crate::ipc::SocketService`] route to populate the
+    /// pane registry whenever the active workspace changes.
+    pub fn terminal_panes(&self) -> Vec<TerminalPane> {
+        let mut out = Vec::new();
+        collect_panes_into(&self.state.borrow().root, &mut out);
+        out
+    }
+
     /// Capture the tree's current structure for persistence. PTY contents
     /// are not part of the snapshot — only the leaf IDs, tab counts, and
     /// split shape.
@@ -299,6 +308,20 @@ fn collect_leaves_into(slot: &NodeSlot, out: &mut Vec<LeafId>) {
         Node::Split(s) => {
             collect_leaves_into(&s.a, out);
             collect_leaves_into(&s.b, out);
+        }
+    }
+}
+
+fn collect_panes_into(slot: &NodeSlot, out: &mut Vec<TerminalPane>) {
+    match &*slot.borrow() {
+        Node::Leaf(l) => {
+            for pane in &l.tabs {
+                out.push(pane.clone());
+            }
+        }
+        Node::Split(s) => {
+            collect_panes_into(&s.a, out);
+            collect_panes_into(&s.b, out);
         }
     }
 }

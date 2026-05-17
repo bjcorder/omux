@@ -4,6 +4,7 @@
 //! shared CSS stylesheet, and hands off to [`ui::AppShell`].
 
 mod agent;
+mod ipc;
 mod pane;
 mod ui;
 mod workspace;
