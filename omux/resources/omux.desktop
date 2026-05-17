@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=omux
+GenericName=Terminal Workspace
+Comment=Multi-terminal workspace with agent-attention notifications
+Exec=omux
+Icon=omux
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;tmux;multiplexer;claude;ai;agent;workspace;
+StartupNotify=true
+StartupWMClass=org.omux.Omux
