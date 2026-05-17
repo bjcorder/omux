@@ -46,18 +46,53 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_startup(|_| install_css());
     app.connect_activate(build_ui);
+    install_signal_handlers(&app);
     // Don't pass argv through; we've already consumed it for our own flags.
     app.run_with_args::<&str>(&[])
+}
+
+/// Catch `SIGINT` / `SIGTERM`: explicitly remove the control socket
+/// (the [`crate::ipc::socket_service::SocketService::Drop`] path doesn't
+/// run reliably through `app.quit()` because glib keeps refs alive past
+/// the gtk loop's end), then quit so any window `close-request` handlers
+/// still run (layout snapshot, etc.).
+fn install_signal_handlers(app: &adw::Application) {
+    use gtk4::glib;
+    let app_for_int = app.clone();
+    glib::unix_signal_add_local(libc::SIGINT, move || {
+        tracing::info!("SIGINT received; quitting");
+        cleanup_runtime_state();
+        app_for_int.quit();
+        glib::ControlFlow::Break
+    });
+    let app_for_term = app.clone();
+    glib::unix_signal_add_local(libc::SIGTERM, move || {
+        tracing::info!("SIGTERM received; quitting");
+        cleanup_runtime_state();
+        app_for_term.quit();
+        glib::ControlFlow::Break
+    });
+}
+
+fn cleanup_runtime_state() {
+    let path = ipc::paths::socket_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::debug!(socket = %path.display(), "removed control socket"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(socket = %path.display(), error = %e, "remove failed"),
+    }
 }
 
 fn run_uninstall_hooks() -> glib::ExitCode {
     match agent::hook_installer::uninstall() {
         Ok(true) => {
-            eprintln!("omux: restored ~/.claude/settings.json from backup");
+            eprintln!(
+                "omux: removed omux hook entries from ~/.claude/settings.json (other entries preserved)"
+            );
             glib::ExitCode::SUCCESS
         }
         Ok(false) => {
-            eprintln!("omux: no backup found; nothing to uninstall");
+            eprintln!("omux: nothing to uninstall (no omux-managed entries found)");
             glib::ExitCode::SUCCESS
         }
         Err(e) => {

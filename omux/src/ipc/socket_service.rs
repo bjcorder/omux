@@ -17,9 +17,23 @@ use super::paths;
 pub type EventHandler = Rc<dyn Fn(HookEvent) + 'static>;
 
 pub struct SocketService {
-    #[allow(dead_code)] // Held to keep the service alive; stopped via Drop / stop().
     inner: gio::SocketService,
     socket_path: PathBuf,
+}
+
+impl Drop for SocketService {
+    fn drop(&mut self) {
+        self.inner.stop();
+        if let Err(e) = std::fs::remove_file(&self.socket_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.socket_path.display(),
+                error = %e,
+                "could not clean up control socket on shutdown",
+            );
+        }
+    }
 }
 
 impl SocketService {

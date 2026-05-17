@@ -84,19 +84,67 @@ pub fn install() -> anyhow::Result<InstallResult> {
     })
 }
 
-/// Restore from the backup if it exists. No-op if no backup is found.
-#[allow(dead_code)] // Reachable via `omux --uninstall-hooks` once CLI flags land (M6 polish).
+/// Surgically remove omux-managed hook entries from the current
+/// `~/.claude/settings.json`, leaving anything else (user-installed
+/// hooks, plugin lists, settings the user or Claude Code added since
+/// install time) untouched.
+///
+/// Returns `true` if at least one omux-managed entry was removed. The
+/// stale backup file is deleted after a successful uninstall.
 pub fn uninstall() -> anyhow::Result<bool> {
     let path = settings_path()
         .ok_or_else(|| anyhow::anyhow!("HOME unset; cannot resolve settings path"))?;
     let backup = backup_path().unwrap();
-    if !backup.exists() {
+    if !path.exists() {
         return Ok(false);
     }
-    let original = read_file(&backup)?;
-    atomic_write(&path, original.as_bytes())?;
-    let _ = std::fs::remove_file(&backup);
-    Ok(true)
+    let text = read_file(&path)?;
+    let mut value: Value = serde_json::from_str(&text)?;
+    let removed = strip_omux_hooks(&mut value);
+    if removed {
+        let serialized = serde_json::to_string_pretty(&value)?;
+        atomic_write(&path, serialized.as_bytes())?;
+        let _ = std::fs::remove_file(&backup);
+    }
+    Ok(removed)
+}
+
+/// Walk `value.hooks.<Event>[*].hooks[*]` and remove any entries
+/// carrying `_omux_managed: true`. Clean up newly empty arrays so the
+/// JSON stays tidy.
+fn strip_omux_hooks(value: &mut Value) -> bool {
+    let Some(hooks) = value.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return false;
+    };
+    let mut changed = false;
+    let event_names: Vec<String> = hooks.keys().cloned().collect();
+    for event in event_names {
+        let Some(arr) = hooks.get_mut(&event).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        let before = arr.len();
+        arr.retain(|entry| {
+            // Keep entries that do NOT contain any omux-managed inner hook.
+            let Some(inner) = entry.get("hooks").and_then(|h| h.as_array()) else {
+                return true;
+            };
+            !inner.iter().any(is_omux_managed)
+        });
+        if arr.len() != before {
+            changed = true;
+        }
+        if arr.is_empty() {
+            hooks.remove(&event);
+        }
+    }
+    // If the top-level `hooks` object is now empty, drop it too so the
+    // file doesn't end up with a dangling `"hooks": {}` block.
+    if hooks.is_empty()
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.remove("hooks");
+    }
+    changed
 }
 
 fn read_file(path: &std::path::Path) -> anyhow::Result<String> {
@@ -270,5 +318,53 @@ mod tests {
             }
         });
         assert!(has_omux_managed_hook(&v));
+    }
+
+    #[test]
+    fn strip_removes_only_managed_entries() {
+        let mut v = json!({
+            "enabledPlugins": { "x": true },
+            "hooks": {
+                "Stop": [
+                    { "matcher": "user", "hooks": [ { "type": "command", "command": "echo bye" } ] },
+                    { "matcher": "", "hooks": [ { "type": "command", "command": "omux-hook stop", SENTINEL: true } ] }
+                ],
+                "Notification": [
+                    { "matcher": "", "hooks": [ { "type": "command", "command": "omux-hook notification", SENTINEL: true } ] }
+                ]
+            }
+        });
+        assert!(strip_omux_hooks(&mut v));
+        // User's enabledPlugins survives untouched.
+        assert_eq!(v["enabledPlugins"]["x"], json!(true));
+        // The user's Stop hook survives; the omux-managed one is gone.
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0]["matcher"], "user");
+        // Notification only had an omux-managed entry → the whole key is dropped.
+        assert!(v["hooks"].get("Notification").is_none());
+    }
+
+    #[test]
+    fn strip_drops_empty_hooks_block() {
+        let mut v = json!({
+            "hooks": {
+                "Stop": [
+                    { "matcher": "", "hooks": [ { "type": "command", "command": "x", SENTINEL: true } ] }
+                ]
+            }
+        });
+        assert!(strip_omux_hooks(&mut v));
+        assert!(v.get("hooks").is_none());
+    }
+
+    #[test]
+    fn strip_is_idempotent_when_nothing_managed() {
+        let mut v = json!({
+            "hooks": { "Stop": [ { "matcher": "", "hooks": [ { "type": "command", "command": "x" } ] } ] }
+        });
+        assert!(!strip_omux_hooks(&mut v));
+        // User hook still present.
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
     }
 }
