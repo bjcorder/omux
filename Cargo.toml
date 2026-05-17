@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["omux", "omux-hook"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+authors = ["bcorder <bjcorder@protonmail.com>"]
+rust-version = "1.85"
+repository = "https://github.com/bcorder/omux"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,16 @@
+[package]
+name = "omux-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Helper invoked by agent harness hooks to signal omux via D-Bus"
+
+[[bin]]
+name = "omux-hook"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
