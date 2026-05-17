@@ -16,5 +16,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 gtk4 = { version = "0.10", features = ["v4_18"] }
 libadwaita = { version = "0.8", features = ["v1_7"] }
+vte4 = { version = "0.9", features = ["v0_78"] }

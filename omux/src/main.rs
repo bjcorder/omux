@@ -1,12 +1,13 @@
-//! omux — M0 scaffold.
-//!
-//! At M0 this binary opens an empty Adwaita window. Real pane/agent
-//! plumbing arrives in later milestones (see plan §10).
+//! omux — M1: window with a single VTE terminal pane running `$SHELL`.
+
+mod pane;
 
 use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
+
+use pane::terminal::TerminalPane;
 
 const APP_ID: &str = "org.omux.Omux";
 
@@ -32,10 +33,14 @@ fn build_ui(app: &adw::Application) {
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
 
-    let placeholder = gtk4::Label::builder()
-        .label("omux — M0 scaffold. Panes arrive at M1.")
-        .build();
-    view.set_content(Some(&placeholder));
+    let pane = TerminalPane::new();
+    tracing::info!(
+        pane_id = %pane.pane_id(),
+        kind = ?pane.kind(),
+        "mounted initial pane",
+    );
+
+    view.set_content(Some(pane.widget()));
 
     window.set_content(Some(&view));
     window.present();
