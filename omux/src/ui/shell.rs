@@ -112,19 +112,37 @@ impl AppShell {
         shell
     }
 
-    /// Every 250 ms, walk the active workspace's PaneTree and sync each
-    /// tab + sidebar badge to the corresponding pane status. Cheap; the
-    /// alternative (status-change callbacks routed through every pane)
-    /// adds threading-style complexity without measurable UX win.
+    /// Every 250 ms, walk the active workspace's PaneTree to:
+    ///
+    /// 1. Sync each tab + sidebar badge to its pane's current status.
+    /// 2. Refresh the pane registry so hook events can route to panes
+    ///    added since the last workspace switch (new-tab, split, etc.).
+    ///
+    /// Cheap; the alternative (status-change + add-pane callbacks routed
+    /// through every mutation site) adds threading-style complexity
+    /// without measurable UX win.
     fn start_badge_refresh_timer(&self) {
         use crate::agent::status::PaneStatus;
         let active = self.active.clone();
         let sidebar = self.sidebar.clone();
+        let registry = self.pane_registry.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
             if let Some((name, tree)) = active.borrow().as_ref() {
                 tree.refresh_badges();
-                let count = tree
-                    .terminal_panes()
+                let panes = tree.terminal_panes();
+
+                // Reconcile registry with the live tree:
+                // remove pane_ids that no longer exist, add any new ones.
+                let mut reg = registry.borrow_mut();
+                let live_ids: std::collections::HashSet<Uuid> =
+                    panes.iter().map(|p| p.pane_id()).collect();
+                reg.retain(|id, _| live_ids.contains(id));
+                for p in &panes {
+                    reg.entry(p.pane_id()).or_insert_with(|| p.clone());
+                }
+                drop(reg);
+
+                let count = panes
                     .iter()
                     .filter(|t| t.status() == PaneStatus::NeedsAttention)
                     .count();
