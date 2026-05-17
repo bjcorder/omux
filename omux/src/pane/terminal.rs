@@ -56,10 +56,12 @@ impl TerminalPane {
         &self.widget
     }
 
+    #[allow(dead_code)] // Wired up at M3 (persistence) and M4 (agent detection).
     pub fn pane_id(&self) -> Uuid {
         self.pane_id
     }
 
+    #[allow(dead_code)] // Wired up at M3 (workspace persistence keys per-kind state).
     pub fn kind(&self) -> PaneKind {
         PaneKind::Terminal
     }
