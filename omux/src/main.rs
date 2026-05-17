@@ -177,6 +177,10 @@ fn install_window_shortcuts(shell: &AppShell) {
 
     let controller = ShortcutController::new();
     controller.set_scope(gtk4::ShortcutScope::Global);
+    // Capture phase so our shortcuts fire BEFORE VTE / WebView grab the
+    // key event as regular input. Without this, e.g. Ctrl+Shift+D is
+    // consumed by the terminal and the split shortcut never runs.
+    controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
     add_shortcut(&controller, "<Control><Shift>d", {
         let shell = shell.handle();
