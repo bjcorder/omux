@@ -489,13 +489,16 @@ impl PaneTree {
     pub fn close_focused_tab(&self) -> bool {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
+        // path_is_root walks the tree borrowing slots — compute BEFORE
+        // with_leaf_mut grabs borrow_mut on the target leaf, otherwise
+        // the path walk re-borrows the same slot and panics.
+        let is_root_leaf = path_is_root(&root_slot, target);
         let mut closed = false;
         let mut became_empty = false;
         let mut close = |leaf: &mut Leaf| {
             let Some(i) = leaf.notebook.current_page() else {
                 return;
             };
-            let is_root_leaf = path_is_root(&root_slot, leaf.id);
             if is_root_leaf && leaf.tabs.len() <= 1 {
                 return;
             }
@@ -627,6 +630,8 @@ fn install_close_buttons(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
 
 fn close_tab_by_pane(state: &Rc<RefCell<TreeState>>, leaf_id: LeafId, pane_id: Uuid) {
     let root_slot = state.borrow().root.clone();
+    // See close_focused_tab: compute outside the with_leaf_mut borrow.
+    let is_root_leaf = path_is_root(&root_slot, leaf_id);
 
     let mut closed = false;
     let mut became_empty = false;
@@ -634,7 +639,6 @@ fn close_tab_by_pane(state: &Rc<RefCell<TreeState>>, leaf_id: LeafId, pane_id: U
         let Some(idx) = leaf.tabs.iter().position(|p| p.pane_id() == pane_id) else {
             return;
         };
-        let is_root_leaf = path_is_root(&root_slot, leaf.id);
         if is_root_leaf && leaf.tabs.len() <= 1 {
             return;
         }
