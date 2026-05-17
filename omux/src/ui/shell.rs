@@ -664,7 +664,13 @@ fn show_new_workspace_dialog(
         }
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let cfg = WorkspaceConfig::new(&name, cwd);
-        match manager.borrow_mut().upsert(cfg) {
+        // Bind the upsert result to a local first — `match
+        // manager.borrow_mut().upsert(...) { ... }` would keep the
+        // borrow_mut alive for the whole match expression, and
+        // switch_workspace inside the Ok arm tries to manager.borrow()
+        // → BorrowError panic.
+        let upsert_result = manager.borrow_mut().upsert(cfg);
+        match upsert_result {
             Ok(()) => {
                 switch_workspace(
                     &manager,
@@ -716,7 +722,11 @@ fn show_rename_dialog(
         if new.is_empty() || new == old {
             return;
         }
-        if let Err(e) = manager.borrow_mut().rename(&old, &new) {
+        // Hoist into a local so the borrow_mut on `manager` is released
+        // before the success branch (which calls manager.borrow() via
+        // refresh_sidebar).
+        let rename_result = manager.borrow_mut().rename(&old, &new);
+        if let Err(e) = rename_result {
             tracing::warn!(error = %e, "rename failed");
             show_error_dialog(&parent_for_cb, &format!("Could not rename: {e}"));
         } else {
