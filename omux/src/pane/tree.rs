@@ -39,18 +39,37 @@ use crate::workspace::snapshot::{LayoutNode, LeafSnapshot, SplitSnapshot, TabKin
 use webkit6::NetworkSession;
 
 /// Attach a `+` MenuButton to the right side of the Notebook's tab
-/// bar. Clicking it opens a popover with "New terminal tab" / "New
-/// browser tab" entries. The actions live on the `leaf.*` action group
-/// installed per-leaf by [`install_focus_in_slot`].
+/// bar. Clicking it opens a sectioned popover:
+///
+/// ```text
+///   New tab
+///     • Terminal
+///     • Browser
+///   Split this pane
+///     • Side-by-side  (h-split)
+///     • Top / bottom  (v-split)
+/// ```
+///
+/// All entries reference the `leaf.*` action group installed per-leaf
+/// by [`install_focus_in_slot`], so clicking from leaf A vs leaf B
+/// targets the right one regardless of which leaf currently has focus.
 fn attach_new_tab_button(notebook: &Notebook) {
     let menu = gio::Menu::new();
-    menu.append(Some("New terminal tab"), Some("leaf.new-terminal"));
-    menu.append(Some("New browser tab"), Some("leaf.new-browser"));
+
+    let tab_section = gio::Menu::new();
+    tab_section.append(Some("Terminal"), Some("leaf.new-terminal"));
+    tab_section.append(Some("Browser"), Some("leaf.new-browser"));
+    menu.append_section(Some("New tab"), &tab_section);
+
+    let split_section = gio::Menu::new();
+    split_section.append(Some("Side-by-side"), Some("leaf.split-horizontal"));
+    split_section.append(Some("Top / bottom"), Some("leaf.split-vertical"));
+    menu.append_section(Some("Split this pane"), &split_section);
 
     let popover = gtk::PopoverMenu::from_model(Some(&menu));
     let btn = gtk::MenuButton::builder()
         .icon_name("list-add-symbolic")
-        .tooltip_text("Add tab")
+        .tooltip_text("Add tab or split")
         .popover(&popover)
         .css_classes(["flat", "leaf-add-tab"])
         .build();
@@ -731,10 +750,10 @@ fn collapse_leaf(state: &Rc<RefCell<TreeState>>, target: LeafId) {
     tracing::debug!(closed = %target, new_focus = %new_focus, "collapsed empty leaf");
 }
 
-/// Install the `leaf.new-terminal` and `leaf.new-browser` actions on
-/// this leaf's notebook. The popover menu attached to the leaf's
-/// `+` MenuButton references these via `leaf.*` so each leaf's button
-/// adds tabs to *itself*, not to whichever leaf is currently focused.
+/// Install the per-leaf `leaf.*` action group on this leaf's notebook.
+/// The popover menu attached to the leaf's `+` MenuButton references
+/// these via `leaf.*` so each leaf's button targets *itself*, not the
+/// currently-focused leaf.
 fn install_leaf_actions(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
     let actions = gio::SimpleActionGroup::new();
     let leaf_id = leaf.id;
@@ -757,7 +776,55 @@ fn install_leaf_actions(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
     });
     actions.add_action(&new_browser);
 
+    let state_for_h = state_weak.clone();
+    let split_h = gio::SimpleAction::new("split-horizontal", None);
+    split_h.connect_activate(move |_, _| {
+        if let Some(state) = state_for_h.upgrade() {
+            split_leaf_via_state(&state, leaf_id, gtk::Orientation::Horizontal);
+        }
+    });
+    actions.add_action(&split_h);
+
+    let state_for_v = state_weak.clone();
+    let split_v = gio::SimpleAction::new("split-vertical", None);
+    split_v.connect_activate(move |_, _| {
+        if let Some(state) = state_for_v.upgrade() {
+            split_leaf_via_state(&state, leaf_id, gtk::Orientation::Vertical);
+        }
+    });
+    actions.add_action(&split_v);
+
     leaf.notebook.insert_action_group("leaf", Some(&actions));
+}
+
+/// Split a specific leaf (by id), regardless of which leaf has focus.
+/// The new (sibling) leaf becomes focused, matching the keyboard
+/// shortcut behavior.
+fn split_leaf_via_state(state: &Rc<RefCell<TreeState>>, target: LeafId, orientation: Orientation) {
+    let root_slot = state.borrow().root.clone();
+    let manifests = state.borrow().manifests.clone();
+    let session = state.borrow().network_session.clone();
+    let bin = state.borrow().bin.clone();
+
+    let new_focus = walk_and_split(
+        &root_slot,
+        target,
+        orientation,
+        &bin,
+        None,
+        &manifests,
+        &session,
+    );
+    let Some(new_focus) = new_focus else {
+        return;
+    };
+
+    state.borrow_mut().focused = new_focus;
+    let state_weak = Rc::downgrade(state);
+    let new_slot = find_leaf_slot(&state.borrow().root, new_focus);
+    if let Some(slot) = new_slot {
+        install_focus_in_slot(&slot, &state_weak);
+    }
 }
 
 fn add_terminal_tab_in_leaf(state: &Rc<RefCell<TreeState>>, target: LeafId) {
