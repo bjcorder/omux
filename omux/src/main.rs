@@ -28,10 +28,61 @@ fn main() -> glib::ExitCode {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("omux=info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    // Handle one-shot CLI commands before opening the GUI.
+    let args: Vec<String> = std::env::args().collect();
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "--uninstall-hooks" => return run_uninstall_hooks(),
+            "--help" | "-h" => return print_help(),
+            "--version" | "-V" => {
+                println!("omux {}", env!("CARGO_PKG_VERSION"));
+                return glib::ExitCode::SUCCESS;
+            }
+            _ => {}
+        }
+    }
+
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_startup(|_| install_css());
     app.connect_activate(build_ui);
-    app.run()
+    // Don't pass argv through; we've already consumed it for our own flags.
+    app.run_with_args::<&str>(&[])
+}
+
+fn run_uninstall_hooks() -> glib::ExitCode {
+    match agent::hook_installer::uninstall() {
+        Ok(true) => {
+            eprintln!("omux: restored ~/.claude/settings.json from backup");
+            glib::ExitCode::SUCCESS
+        }
+        Ok(false) => {
+            eprintln!("omux: no backup found; nothing to uninstall");
+            glib::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("omux: uninstall failed: {e}");
+            glib::ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_help() -> glib::ExitCode {
+    println!(
+        "omux {} — multi-terminal workspace with agent-attention notifications\n\
+         \n\
+         USAGE:\n    \
+             omux                       launch the GUI\n    \
+             omux --uninstall-hooks     remove omux hooks from ~/.claude/settings.json\n    \
+             omux --version             print version\n    \
+             omux --help                show this message\n\
+         \n\
+         RUNTIME ENV:\n    \
+             OMUX_PANE_ID    injected by omux into each pane shell; read by omux-hook\n    \
+             OMUX_SOCKET     override the control socket path (default: \
+             $XDG_RUNTIME_DIR/omux/control.sock)",
+        env!("CARGO_PKG_VERSION"),
+    );
+    glib::ExitCode::SUCCESS
 }
 
 fn install_css() {

@@ -11,7 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gtk4 as gtk;
 use gtk4::gio;
@@ -19,7 +19,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use uuid::Uuid;
 use vte4::prelude::*;
-use vte4::{PtyFlags, Terminal};
+use vte4::{Format, PtyFlags, Terminal};
 
 use crate::agent::detect::{self, Detection};
 use crate::agent::manifest::CompiledManifest;
@@ -28,6 +28,11 @@ use crate::agent::status::{PaneStatus, StatusEvent};
 use super::PaneKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Minimum delay between two consecutive output-regex AttentionRequested
+/// events. Without this, a steady prompt-tail would fire on every poll.
+const REGEX_DEBOUNCE: Duration = Duration::from_secs(2);
+/// How many bottom rows to scan for the needs-attention regex fallback.
+const REGEX_SCAN_ROWS: i64 = 6;
 
 #[derive(Clone)]
 pub struct TerminalPane {
@@ -36,6 +41,12 @@ pub struct TerminalPane {
     pane_id: Uuid,
     status: Rc<Cell<PaneStatus>>,
     detection: Rc<RefCell<Option<Detection>>>,
+    /// Last text that matched a needs-attention regex (used to dedupe
+    /// repeated firings on the same prompt).
+    last_match_text: Rc<RefCell<Option<String>>>,
+    /// Last time we fired an AttentionRequested event from the regex
+    /// fallback (used for [`REGEX_DEBOUNCE`]).
+    last_match_at: Rc<Cell<Option<Instant>>>,
 }
 
 impl TerminalPane {
@@ -77,6 +88,8 @@ impl TerminalPane {
             pane_id,
             status: Rc::new(Cell::new(PaneStatus::Idle)),
             detection: Rc::new(RefCell::new(None)),
+            last_match_text: Rc::new(RefCell::new(None)),
+            last_match_at: Rc::new(Cell::new(None)),
         };
 
         me.install_focus_clear();
@@ -169,6 +182,8 @@ impl TerminalPane {
                     (Some(_), None) => {
                         tracing::info!(pane = %me.pane_id, "agent gone");
                         me.apply_status_event(StatusEvent::AgentStopped);
+                        me.last_match_text.borrow_mut().take();
+                        me.last_match_at.set(None);
                     }
                     (Some(prev), Some(now)) if prev.manifest_name != now.manifest_name => {
                         tracing::info!(
@@ -181,10 +196,49 @@ impl TerminalPane {
                     }
                     _ => {}
                 }
-                *me.detection.borrow_mut() = current;
+                *me.detection.borrow_mut() = current.clone();
             }
+
+            // PTY output regex fallback (M4 phase E). For agents without
+            // hook integration (and as a safety net for those with hooks),
+            // scan the last few rows for any needs-attention pattern.
+            if let Some(d) = current.as_ref()
+                && me.status.get() != PaneStatus::NeedsAttention
+                && let Some(manifest) = manifests.iter().find(|m| m.name == d.manifest_name)
+                && !manifest.needs_attention_patterns.is_empty()
+                && let Some(text) = read_recent_text(&terminal, REGEX_SCAN_ROWS)
+                && manifest
+                    .needs_attention_patterns
+                    .iter()
+                    .any(|r| r.is_match(&text))
+                && me.should_fire_regex_attention(&text)
+            {
+                tracing::info!(
+                    pane = %me.pane_id,
+                    agent = %d.manifest_name,
+                    "needs-attention regex matched",
+                );
+                me.apply_status_event(StatusEvent::AttentionRequested);
+                *me.last_match_text.borrow_mut() = Some(text);
+                me.last_match_at.set(Some(Instant::now()));
+            }
+
             glib::ControlFlow::Continue
         });
+    }
+
+    fn should_fire_regex_attention(&self, text: &str) -> bool {
+        if let Some(last_text) = self.last_match_text.borrow().as_deref()
+            && last_text == text
+        {
+            return false;
+        }
+        if let Some(when) = self.last_match_at.get()
+            && when.elapsed() < REGEX_DEBOUNCE
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -200,4 +254,14 @@ fn vte_fd(terminal: &Terminal) -> Option<RawFd> {
     let pty = terminal.pty()?;
     let fd: BorrowedFd<'_> = pty.fd();
     Some(fd.as_raw_fd())
+}
+
+/// Grab the last `rows` rows of visible text from the terminal as a
+/// plain string. Used by the regex-fallback agent attention detector.
+fn read_recent_text(terminal: &Terminal, rows: i64) -> Option<String> {
+    let (_, cursor_row) = terminal.cursor_position();
+    let start_row = (cursor_row - rows).max(0);
+    let (maybe, _len) = terminal.text_range_format(Format::Text, start_row, 0, cursor_row, -1);
+    let s = maybe?.to_string();
+    if s.is_empty() { None } else { Some(s) }
 }

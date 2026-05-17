@@ -19,8 +19,9 @@
 //! | `Vertical`       | panes top/bottom    | "v-split" |
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
+use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4::{Notebook, Orientation, Paned, Widget};
 use libadwaita as adw;
@@ -181,7 +182,9 @@ impl PaneTree {
             network_session,
         }));
 
-        Self { bin, state }
+        let me = Self { bin, state };
+        me.install_focus_in_subtree(&me.state.borrow().root);
+        me
     }
 
     pub fn widget(&self) -> &adw::Bin {
@@ -208,6 +211,12 @@ impl PaneTree {
             &session,
         ) {
             self.state.borrow_mut().focused = new_focus;
+            // Install focus tracking on the panes of the newly created leaf.
+            let state_weak = Rc::downgrade(&self.state);
+            let new_slot = find_leaf_slot(&self.state.borrow().root, new_focus);
+            if let Some(slot) = new_slot {
+                install_focus_in_slot(&slot, &state_weak);
+            }
         }
     }
 
@@ -216,7 +225,13 @@ impl PaneTree {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
         let manifests = self.state.borrow().manifests.clone();
-        let mut add = |leaf: &mut Leaf| leaf.add_terminal_tab(&manifests);
+        let state_weak = Rc::downgrade(&self.state);
+        let mut add = |leaf: &mut Leaf| {
+            leaf.add_terminal_tab(&manifests);
+            if let Some(p) = leaf.tabs.last() {
+                install_focus_tracking(p, leaf.id, &state_weak);
+            }
+        };
         with_leaf_mut(&root_slot, target, &mut add);
     }
 
@@ -225,7 +240,13 @@ impl PaneTree {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
         let session = self.state.borrow().network_session.clone();
-        let mut add = |leaf: &mut Leaf| leaf.add_browser_tab(&session, url);
+        let state_weak = Rc::downgrade(&self.state);
+        let mut add = |leaf: &mut Leaf| {
+            leaf.add_browser_tab(&session, url);
+            if let Some(p) = leaf.tabs.last() {
+                install_focus_tracking(p, leaf.id, &state_weak);
+            }
+        };
         with_leaf_mut(&root_slot, target, &mut add);
     }
 
@@ -304,7 +325,7 @@ impl PaneTree {
             Node::Split(s) => s.paned.clone().upcast(),
         };
         let bin = adw::Bin::builder().child(&root_widget).build();
-        Self {
+        let me = Self {
             bin,
             state: Rc::new(RefCell::new(TreeState {
                 root: root_slot,
@@ -312,8 +333,45 @@ impl PaneTree {
                 manifests: Rc::new(manifests.to_vec()),
                 network_session,
             })),
+        };
+        me.install_focus_in_subtree(&me.state.borrow().root);
+        me
+    }
+
+    /// Walk the slot's subtree and attach an `EventControllerFocus` to
+    /// every pane's outer frame so focus → `TreeState::focused` updates
+    /// automatically when the user clicks into a pane.
+    fn install_focus_in_subtree(&self, slot: &NodeSlot) {
+        let state_weak = Rc::downgrade(&self.state);
+        install_focus_in_slot(slot, &state_weak);
+    }
+}
+
+fn install_focus_in_slot(slot: &NodeSlot, state_weak: &Weak<RefCell<TreeState>>) {
+    match &*slot.borrow() {
+        Node::Leaf(l) => {
+            for pane in &l.tabs {
+                install_focus_tracking(pane, l.id, state_weak);
+            }
+        }
+        Node::Split(s) => {
+            install_focus_in_slot(&s.a, state_weak);
+            install_focus_in_slot(&s.b, state_weak);
         }
     }
+}
+
+fn install_focus_tracking(pane: &Pane, leaf_id: LeafId, state_weak: &Weak<RefCell<TreeState>>) {
+    let controller = gtk::EventControllerFocus::new();
+    let state_weak = state_weak.clone();
+    controller.connect_contains_focus_notify(move |c| {
+        if c.contains_focus()
+            && let Some(state) = state_weak.upgrade()
+        {
+            state.borrow_mut().focused = leaf_id;
+        }
+    });
+    pane.widget().add_controller(controller);
 }
 
 fn snapshot_slot(slot: &NodeSlot) -> LayoutNode {
@@ -378,6 +436,17 @@ fn first_leaf_id(slot: &NodeSlot) -> Uuid {
         Node::Leaf(l) => l.id,
         Node::Split(s) => first_leaf_id(&s.a),
     }
+}
+
+/// Find the [`NodeSlot`] of a specific leaf, returning a clone of the
+/// `Rc<RefCell<Node>>` that holds it.
+fn find_leaf_slot(slot: &NodeSlot, target: LeafId) -> Option<NodeSlot> {
+    let kind = match &*slot.borrow() {
+        Node::Leaf(l) if l.id == target => return Some(slot.clone()),
+        Node::Leaf(_) => return None,
+        Node::Split(s) => (s.a.clone(), s.b.clone()),
+    };
+    find_leaf_slot(&kind.0, target).or_else(|| find_leaf_slot(&kind.1, target))
 }
 
 fn collect_leaves_into(slot: &NodeSlot, out: &mut Vec<LeafId>) {
@@ -478,6 +547,11 @@ fn walk_and_split(
             // Build the new structure outside the borrow.
             let new_leaf = Leaf::new(manifests, session);
             let new_leaf_id = new_leaf.id;
+            // Install focus tracking on the new leaf's panes. The old
+            // leaf already has controllers from initial construction.
+            // We defer access to TreeState — the slot's NodeSlot doesn't
+            // carry a back-reference. This is handled at the caller in
+            // PaneTree::split via post_split_install_focus below.
             let paned = Paned::builder()
                 .orientation(orientation)
                 .resize_start_child(true)
