@@ -136,6 +136,10 @@ struct TreeState {
     focused: LeafId,
     manifests: Rc<Vec<CompiledManifest>>,
     network_session: NetworkSession,
+    /// Top-level container the tree mounts into. Kept here so structural
+    /// mutations (`collapse_leaf`) can re-parent the surviving subtree
+    /// when the closed leaf was a direct child of root.
+    bin: adw::Bin,
 }
 
 type NodeSlot = Rc<RefCell<Node>>;
@@ -245,26 +249,26 @@ impl Leaf {
         self.tab_close_buttons.push(close_btn);
     }
 
-    /// Close the currently selected tab. Refuses if it's the last tab
-    /// in the leaf (the leaf would have no panes; we defer collapsing
-    /// to a future iteration that handles split rewiring).
-    fn close_current_tab(&mut self) -> bool {
+    /// Close the currently selected tab. Returns `(closed, became_empty)`.
+    /// Caller decides whether to collapse the leaf or refuse.
+    #[allow(dead_code)] // Reserved for future close-current paths that take a leaf reference.
+    fn close_current_tab(&mut self) -> (bool, bool) {
         let Some(idx) = self.notebook.current_page() else {
-            return false;
+            return (false, false);
         };
         self.close_tab_at(idx as usize)
     }
 
-    /// Close the tab at the given index. Refuses if it's the last tab.
-    fn close_tab_at(&mut self, idx: usize) -> bool {
-        if self.tabs.len() <= 1 || idx >= self.tabs.len() {
-            return false;
+    /// Close the tab at the given index. Returns `(closed, became_empty)`.
+    fn close_tab_at(&mut self, idx: usize) -> (bool, bool) {
+        if idx >= self.tabs.len() {
+            return (false, false);
         }
         self.notebook.remove_page(Some(idx as u32));
         self.tabs.remove(idx);
         self.tab_badges.remove(idx);
         self.tab_close_buttons.remove(idx);
-        true
+        (true, self.tabs.is_empty())
     }
 
     /// Sync each tab's badge visibility to its pane's current status.
@@ -308,6 +312,7 @@ impl PaneTree {
             focused,
             manifests: Rc::new(manifests.to_vec()),
             network_session,
+            bin: bin.clone(),
         }));
 
         let me = Self { bin, state };
@@ -476,16 +481,32 @@ impl PaneTree {
         refresh_badges_in_slot(&self.state.borrow().root);
     }
 
-    /// Close the focused leaf's currently active tab, if more than one
-    /// tab remains. Returns true if a tab was closed.
+    /// Close the focused leaf's currently active tab. If that was the
+    /// last tab AND the leaf is part of a split, the now-empty leaf
+    /// collapses out of the tree (the sibling subtree takes its place).
+    /// If the leaf is the root of the workspace, the last tab refuses
+    /// to close — we don't allow an empty workspace.
     pub fn close_focused_tab(&self) -> bool {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
         let mut closed = false;
+        let mut became_empty = false;
         let mut close = |leaf: &mut Leaf| {
-            closed = leaf.close_current_tab();
+            let Some(i) = leaf.notebook.current_page() else {
+                return;
+            };
+            let is_root_leaf = path_is_root(&root_slot, leaf.id);
+            if is_root_leaf && leaf.tabs.len() <= 1 {
+                return;
+            }
+            let (c, e) = leaf.close_tab_at(i as usize);
+            closed = c;
+            became_empty = e;
         };
         with_leaf_mut(&root_slot, target, &mut close);
+        if closed && became_empty {
+            collapse_leaf(&self.state, target);
+        }
         closed
     }
 
@@ -544,12 +565,13 @@ impl PaneTree {
         };
         let bin = adw::Bin::builder().child(&root_widget).build();
         let me = Self {
-            bin,
+            bin: bin.clone(),
             state: Rc::new(RefCell::new(TreeState {
                 root: root_slot,
                 focused,
                 manifests: Rc::new(manifests.to_vec()),
                 network_session,
+                bin,
             })),
         };
         me.install_focus_in_subtree(&me.state.borrow().root);
@@ -582,16 +604,20 @@ fn install_focus_in_slot(slot: &NodeSlot, state_weak: &Weak<RefCell<TreeState>>)
 }
 
 /// Wire each tab's `×` close button to remove its pane.
+///
+/// Idempotency note: this is only ever called by [`install_focus_in_slot`]
+/// once per leaf — either at `PaneTree::from_snapshot` / `PaneTree::new`
+/// time, or for a freshly-created new leaf after a split. Buttons added
+/// later (via `new_tab_in_focused`, `new_browser_tab_in_focused`, or the
+/// per-leaf `+` actions) are wired in [`wire_last_pane`]. So we never
+/// re-walk an already-wired leaf and don't need a guard.
 fn install_close_buttons(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
     let leaf_id = leaf.id;
     for (pane, button) in leaf.tabs.iter().zip(leaf.tab_close_buttons.iter()) {
-        // Skip if already wired (idempotent for re-walks after split).
-        if button.observe_controllers().n_items() > 0 {
-            continue;
-        }
         let pane_id = pane.pane_id();
         let state_weak = state_weak.clone();
         button.connect_clicked(move |_| {
+            tracing::debug!(leaf = %leaf_id, pane = %pane_id, "tab close button clicked");
             if let Some(state) = state_weak.upgrade() {
                 close_tab_by_pane(&state, leaf_id, pane_id);
             }
@@ -601,12 +627,104 @@ fn install_close_buttons(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
 
 fn close_tab_by_pane(state: &Rc<RefCell<TreeState>>, leaf_id: LeafId, pane_id: Uuid) {
     let root_slot = state.borrow().root.clone();
+
+    let mut closed = false;
+    let mut became_empty = false;
     let mut close = |leaf: &mut Leaf| {
-        if let Some(idx) = leaf.tabs.iter().position(|p| p.pane_id() == pane_id) {
-            let _ = leaf.close_tab_at(idx);
+        let Some(idx) = leaf.tabs.iter().position(|p| p.pane_id() == pane_id) else {
+            return;
+        };
+        let is_root_leaf = path_is_root(&root_slot, leaf.id);
+        if is_root_leaf && leaf.tabs.len() <= 1 {
+            return;
         }
+        let (c, e) = leaf.close_tab_at(idx);
+        closed = c;
+        became_empty = e;
     };
     with_leaf_mut(&root_slot, leaf_id, &mut close);
+
+    if closed && became_empty {
+        collapse_leaf(state, leaf_id);
+    }
+}
+
+/// True iff the given leaf id is the root node of the tree (i.e., has
+/// no parent split). Used to refuse closing the last tab of a workspace
+/// (we don't allow empty workspaces — only empty leaves inside splits
+/// get collapsed away).
+fn path_is_root(root_slot: &NodeSlot, leaf_id: LeafId) -> bool {
+    path_to_leaf(root_slot, leaf_id)
+        .map(|p| p.is_empty())
+        .unwrap_or(false)
+}
+
+/// Collapse a now-empty leaf out of its parent split: replace the
+/// parent split with the surviving sibling subtree, and re-parent the
+/// sibling widget into the grandparent (or the root bin if the parent
+/// was the root). A no-op if the leaf has no parent — refuse-policy
+/// for root leaves is enforced by callers before invoking this.
+fn collapse_leaf(state: &Rc<RefCell<TreeState>>, target: LeafId) {
+    let root_slot = state.borrow().root.clone();
+    let bin = state.borrow().bin.clone();
+
+    let path = match path_to_leaf(&root_slot, target) {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    let parent_step = &path[0];
+
+    // Identify the sibling slot under the parent split.
+    let sibling_slot = {
+        let parent = parent_step.split_slot.borrow();
+        let Node::Split(s) = &*parent else { return };
+        match parent_step.came_from {
+            ChildSlot::Start => s.b.clone(),
+            ChildSlot::End => s.a.clone(),
+        }
+    };
+
+    // Grab the sibling's current widget (we'll re-parent it).
+    let sibling_widget: Widget = match &*sibling_slot.borrow() {
+        Node::Leaf(l) => l.notebook.clone().upcast(),
+        Node::Split(s) => s.paned.clone().upcast(),
+    };
+    detach_from_parent(&sibling_widget);
+
+    // Move sibling's Node into the parent's slot. Leave a throwaway
+    // Leaf in the sibling slot so RefCell is still valid; it'll be
+    // dropped when the Rc goes out of scope.
+    let throwaway = Node::Leaf(Leaf {
+        id: Uuid::nil(),
+        notebook: Notebook::new(),
+        tabs: Vec::new(),
+        tab_badges: Vec::new(),
+        tab_close_buttons: Vec::new(),
+    });
+    let sibling_node = std::mem::replace(&mut *sibling_slot.borrow_mut(), throwaway);
+    *parent_step.split_slot.borrow_mut() = sibling_node;
+
+    // Wire the surviving subtree into the grandparent (or root bin).
+    match path.get(1) {
+        Some(grandparent) => {
+            let gp_borrow = grandparent.split_slot.borrow();
+            if let Node::Split(s) = &*gp_borrow {
+                match grandparent.came_from {
+                    ChildSlot::Start => s.paned.set_start_child(Some(&sibling_widget)),
+                    ChildSlot::End => s.paned.set_end_child(Some(&sibling_widget)),
+                }
+            }
+        }
+        None => {
+            // Parent was the tree root.
+            bin.set_child(Some(&sibling_widget));
+        }
+    }
+
+    // Move focus into a leaf that actually exists in the surviving tree.
+    let new_focus = first_leaf_id(&state.borrow().root);
+    state.borrow_mut().focused = new_focus;
+    tracing::debug!(closed = %target, new_focus = %new_focus, "collapsed empty leaf");
 }
 
 /// Install the `leaf.new-terminal` and `leaf.new-browser` actions on
