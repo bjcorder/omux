@@ -20,6 +20,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 directories = "5"
+regex = "1"
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

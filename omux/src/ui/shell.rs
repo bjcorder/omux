@@ -21,6 +21,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
+use crate::agent::manifest::CompiledManifest;
 use crate::pane::tree::PaneTree;
 use crate::workspace::WorkspaceConfig;
 use crate::workspace::WorkspaceManager;
@@ -37,11 +38,17 @@ pub struct AppShell {
     sidebar: Sidebar,
     content_bin: adw::Bin,
     active: Rc<RefCell<Option<(String, PaneTree)>>>,
+    manifests: Rc<Vec<CompiledManifest>>,
 }
 
 impl AppShell {
-    pub fn build(app: &adw::Application, manager: WorkspaceManager) -> Self {
+    pub fn build(
+        app: &adw::Application,
+        manager: WorkspaceManager,
+        manifests: Vec<CompiledManifest>,
+    ) -> Self {
         let manager = Rc::new(RefCell::new(manager));
+        let manifests = Rc::new(manifests);
 
         // Window + chrome.
         let window = adw::ApplicationWindow::builder()
@@ -77,6 +84,7 @@ impl AppShell {
             sidebar,
             content_bin,
             active,
+            manifests,
         };
 
         ensure_default_workspace(&shell.manager);
@@ -142,8 +150,9 @@ impl AppShell {
         let active = self.active.clone();
         let content_bin = self.content_bin.clone();
         let sidebar = self.sidebar.clone();
+        let manifests = self.manifests.clone();
         self.sidebar.on_select(move |name| {
-            switch_workspace(&manager, &active, &content_bin, name);
+            switch_workspace(&manager, &active, &content_bin, name, &manifests);
             sidebar.set_active(Some(name));
         });
 
@@ -153,6 +162,7 @@ impl AppShell {
         let content_bin = self.content_bin.clone();
         let sidebar = self.sidebar.clone();
         let window = self.window.clone();
+        let manifests = self.manifests.clone();
         self.sidebar.on_new(move || {
             show_new_workspace_dialog(
                 &window,
@@ -160,6 +170,7 @@ impl AppShell {
                 active.clone(),
                 content_bin.clone(),
                 sidebar.clone(),
+                manifests.clone(),
             );
         });
 
@@ -177,6 +188,7 @@ impl AppShell {
         let content_bin = self.content_bin.clone();
         let sidebar = self.sidebar.clone();
         let window = self.window.clone();
+        let manifests = self.manifests.clone();
         self.sidebar.on_delete(move |name| {
             show_delete_dialog(
                 &window,
@@ -185,6 +197,7 @@ impl AppShell {
                 content_bin.clone(),
                 sidebar.clone(),
                 name.to_string(),
+                manifests.clone(),
             );
         });
 
@@ -213,7 +226,13 @@ impl AppShell {
     }
 
     fn switch_to(&self, name: &str) {
-        switch_workspace(&self.manager, &self.active, &self.content_bin, name);
+        switch_workspace(
+            &self.manager,
+            &self.active,
+            &self.content_bin,
+            name,
+            &self.manifests,
+        );
         self.sidebar.set_active(Some(name));
     }
 }
@@ -255,6 +274,7 @@ fn switch_workspace(
     active: &Rc<RefCell<Option<(String, PaneTree)>>>,
     content_bin: &adw::Bin,
     name: &str,
+    manifests: &Rc<Vec<CompiledManifest>>,
 ) {
     // 1. Snapshot the currently active tree (if any) and persist its layout.
     save_active_layout(manager, active);
@@ -265,7 +285,7 @@ fn switch_workspace(
         .get(name)
         .and_then(|e| e.config.layout.clone())
         .unwrap_or_else(LayoutNode::single_leaf);
-    let tree = PaneTree::from_snapshot(&layout);
+    let tree = PaneTree::from_snapshot(&layout, manifests);
     content_bin.set_child(Some(tree.widget()));
 
     // 3. Update manager + active record.
@@ -298,6 +318,7 @@ fn show_new_workspace_dialog(
     active: Rc<RefCell<Option<(String, PaneTree)>>>,
     content_bin: adw::Bin,
     sidebar: Sidebar,
+    manifests: Rc<Vec<CompiledManifest>>,
 ) {
     let entry = gtk::Entry::builder()
         .placeholder_text("Workspace name")
@@ -340,7 +361,7 @@ fn show_new_workspace_dialog(
         let cfg = WorkspaceConfig::new(&name, cwd);
         match manager.borrow_mut().upsert(cfg) {
             Ok(()) => {
-                switch_workspace(&manager, &active, &content_bin, &name);
+                switch_workspace(&manager, &active, &content_bin, &name, &manifests);
                 refresh_sidebar(&manager, &sidebar);
             }
             Err(e) => {
@@ -400,6 +421,7 @@ fn show_delete_dialog(
     content_bin: adw::Bin,
     sidebar: Sidebar,
     name: String,
+    manifests: Rc<Vec<CompiledManifest>>,
 ) {
     let dialog = adw::AlertDialog::new(
         Some("Delete workspace?"),
@@ -434,7 +456,7 @@ fn show_delete_dialog(
                 .first()
                 .map(|e| e.config.name.clone());
             if let Some(next) = next {
-                switch_workspace(&manager, &active, &content_bin, &next);
+                switch_workspace(&manager, &active, &content_bin, &next, &manifests);
             }
         }
         refresh_sidebar(&manager, &sidebar);

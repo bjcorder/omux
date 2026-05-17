@@ -28,6 +28,7 @@ use libadwaita::prelude::*;
 use uuid::Uuid;
 
 use super::terminal::TerminalPane;
+use crate::agent::manifest::CompiledManifest;
 use crate::workspace::SnapshotOrientation;
 use crate::workspace::snapshot::{LayoutNode, LeafSnapshot, SplitSnapshot};
 
@@ -48,6 +49,7 @@ pub struct PaneTree {
 struct TreeState {
     root: NodeSlot,
     focused: LeafId,
+    manifests: Rc<Vec<CompiledManifest>>,
 }
 
 type NodeSlot = Rc<RefCell<Node>>;
@@ -80,11 +82,11 @@ impl Node {
 }
 
 impl Leaf {
-    fn new() -> Self {
-        Self::with_id_and_tabs(Uuid::new_v4(), 1)
+    fn new(manifests: &[CompiledManifest]) -> Self {
+        Self::with_id_and_tabs(Uuid::new_v4(), 1, manifests)
     }
 
-    fn with_id_and_tabs(id: Uuid, tab_count: usize) -> Self {
+    fn with_id_and_tabs(id: Uuid, tab_count: usize, manifests: &[CompiledManifest]) -> Self {
         let notebook = Notebook::builder()
             .scrollable(true)
             .show_border(false)
@@ -95,17 +97,17 @@ impl Leaf {
             tabs: Vec::new(),
         };
         for _ in 0..tab_count.max(1) {
-            leaf.add_tab();
+            leaf.add_tab(manifests);
         }
         leaf
     }
 
-    fn add_tab(&mut self) {
-        let pane = TerminalPane::new();
+    fn add_tab(&mut self, manifests: &[CompiledManifest]) {
+        let pane = TerminalPane::new_with_manifests(manifests);
         let label = gtk4::Label::new(Some("shell"));
         let idx = self.notebook.append_page(pane.widget(), Some(&label));
         self.notebook.set_current_page(Some(idx));
-        pane.widget().grab_focus();
+        pane.terminal().grab_focus();
         self.tabs.push(pane);
     }
 }
@@ -115,8 +117,8 @@ impl PaneTree {
     /// [`PaneTree::from_snapshot`] for the production path (it handles
     /// the single-leaf case via [`LayoutNode::single_leaf`]).
     #[allow(dead_code)]
-    pub fn new() -> Self {
-        let leaf = Leaf::new();
+    pub fn new(manifests: &[CompiledManifest]) -> Self {
+        let leaf = Leaf::new(manifests);
         let focused = leaf.id;
         let root_widget: Widget = leaf.notebook.clone().upcast();
         let root_slot: NodeSlot = Rc::new(RefCell::new(Node::Leaf(leaf)));
@@ -125,6 +127,7 @@ impl PaneTree {
         let state = Rc::new(RefCell::new(TreeState {
             root: root_slot,
             focused,
+            manifests: Rc::new(manifests.to_vec()),
         }));
 
         Self { bin, state }
@@ -140,9 +143,12 @@ impl PaneTree {
     pub fn split(&self, orientation: Orientation) {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
+        let manifests = self.state.borrow().manifests.clone();
         let bin = self.bin.clone();
 
-        if let Some(new_focus) = walk_and_split(&root_slot, target, orientation, &bin, None) {
+        if let Some(new_focus) =
+            walk_and_split(&root_slot, target, orientation, &bin, None, &manifests)
+        {
             self.state.borrow_mut().focused = new_focus;
         }
     }
@@ -151,7 +157,8 @@ impl PaneTree {
     pub fn new_tab_in_focused(&self) {
         let target = self.state.borrow().focused;
         let root_slot = self.state.borrow().root.clone();
-        let mut add = |leaf: &mut Leaf| leaf.add_tab();
+        let manifests = self.state.borrow().manifests.clone();
+        let mut add = |leaf: &mut Leaf| leaf.add_tab(&manifests);
         with_leaf_mut(&root_slot, target, &mut add);
     }
 
@@ -207,8 +214,8 @@ impl PaneTree {
     }
 
     /// Rebuild a tree from a snapshot. Each leaf gets fresh shells.
-    pub fn from_snapshot(snapshot: &LayoutNode) -> Self {
-        let root_slot = build_from_snapshot(snapshot);
+    pub fn from_snapshot(snapshot: &LayoutNode, manifests: &[CompiledManifest]) -> Self {
+        let root_slot = build_from_snapshot(snapshot, manifests);
         let focused = first_leaf_id(&root_slot);
         let root_widget: Widget = match &*root_slot.borrow() {
             Node::Leaf(l) => l.notebook.clone().upcast(),
@@ -220,6 +227,7 @@ impl PaneTree {
             state: Rc::new(RefCell::new(TreeState {
                 root: root_slot,
                 focused,
+                manifests: Rc::new(manifests.to_vec()),
             })),
         }
     }
@@ -240,15 +248,15 @@ fn snapshot_slot(slot: &NodeSlot) -> LayoutNode {
     }
 }
 
-fn build_from_snapshot(node: &LayoutNode) -> NodeSlot {
+fn build_from_snapshot(node: &LayoutNode, manifests: &[CompiledManifest]) -> NodeSlot {
     match node {
         LayoutNode::Leaf(l) => {
-            let leaf = Leaf::with_id_and_tabs(l.id, l.tabs);
+            let leaf = Leaf::with_id_and_tabs(l.id, l.tabs, manifests);
             Rc::new(RefCell::new(Node::Leaf(leaf)))
         }
         LayoutNode::Split(s) => {
-            let a_slot = build_from_snapshot(&s.a);
-            let b_slot = build_from_snapshot(&s.b);
+            let a_slot = build_from_snapshot(&s.a, manifests);
+            let b_slot = build_from_snapshot(&s.b, manifests);
             let a_widget: Widget = match &*a_slot.borrow() {
                 Node::Leaf(l) => l.notebook.clone().upcast(),
                 Node::Split(s) => s.paned.clone().upcast(),
@@ -328,6 +336,7 @@ fn walk_and_split(
     orientation: Orientation,
     root_bin: &adw::Bin,
     parent: Option<(Paned, ChildSlot)>,
+    manifests: &[CompiledManifest],
 ) -> Option<LeafId> {
     // Probe what kind of node we're looking at without holding the borrow during recursion.
     let action = match &*slot.borrow() {
@@ -347,6 +356,7 @@ fn walk_and_split(
             orientation,
             root_bin,
             Some((paned.clone(), ChildSlot::Start)),
+            manifests,
         )
         .or_else(|| {
             walk_and_split(
@@ -355,11 +365,12 @@ fn walk_and_split(
                 orientation,
                 root_bin,
                 Some((paned, ChildSlot::End)),
+                manifests,
             )
         }),
         Action::SplitHere => {
             // Build the new structure outside the borrow.
-            let new_leaf = Leaf::new();
+            let new_leaf = Leaf::new(manifests);
             let new_leaf_id = new_leaf.id;
             let paned = Paned::builder()
                 .orientation(orientation)

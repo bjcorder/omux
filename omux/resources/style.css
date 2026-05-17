@@ -1,0 +1,30 @@
+/* omux — pane notification ring and status styling.
+ *
+ * Applied by `pane::terminal::TerminalPane::apply_status_class()` based
+ * on the [`PaneStatus`] state machine in `agent::status`.
+ *
+ * Status classes go on the `gtk::Frame` wrapper widget (CSS class
+ * `pane-frame`). The terminal widget itself doesn't carry the class so
+ * the ring sits *around* the content, not inside it.
+ */
+
+.pane-frame {
+  /* default state: no border so the terminal occupies the full frame */
+  border: 0;
+  padding: 2px;
+  border-radius: 4px;
+  transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+/* Agent process detected but not requesting attention.
+ * Subtle hint so users can scan at a glance which panes have an agent. */
+.pane-frame.agent-running {
+  border: 1px solid alpha(@accent_color, 0.35);
+}
+
+/* Headline state: agent has finished a turn or is requesting input.
+ * Bright accent ring around the pane (cmux-style "notification ring"). */
+.pane-frame.needs-attention {
+  border: 2px solid @accent_color;
+  box-shadow: 0 0 8px alpha(@accent_color, 0.6);
+}
