@@ -37,17 +37,20 @@ that's recorded forever in a public log.**
 
 ## Install `slsa-verifier`
 
-Pick one:
+`slsa-verifier` is written in Go; it's not on crates.io. Pick one:
 
 ```sh
-# Option A: via cargo (no Go toolchain needed if you already have Rust)
-cargo install --locked slsa-verifier
-
-# Option B: via Go
+# Option A: via Go (requires a Go toolchain)
 go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@latest
 
-# Option C: prebuilt binary
-# Download from https://github.com/slsa-framework/slsa-verifier/releases
+# Option B: prebuilt binary
+# Download the latest release for your OS / arch from
+# https://github.com/slsa-framework/slsa-verifier/releases
+# and place it on your $PATH.
+
+# Option C: package manager
+# Arch Linux (AUR):   paru -S slsa-verifier        # (or yay, etc.)
+# macOS / Linuxbrew:  brew install slsa-verifier
 ```
 
 Confirm:
