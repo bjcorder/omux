@@ -375,7 +375,7 @@ the UI interactions.
 PRs welcome. Conventional commits are required (`cargo-release` and
 the release notes pipeline parse the subject lines). See
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the format. Maintainers
-cutting a release should follow [`docs/RELEASING.md`](./docs/RELEASING.md).
+cutting a release should follow [`RELEASING.md`](./RELEASING.md).
 
 ## Security
 
