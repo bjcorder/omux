@@ -77,6 +77,13 @@ where
 {
     let mut cmd = Command::new(HOOK_BIN);
     cmd.args(args);
+    // Strip any pane-id env vars the developer's shell might be
+    // exporting (e.g. running tests inside an omux pane, which sets
+    // OMUX_PANE_ID, or under Claude Code's rcfile snippet that sets
+    // CLAUDE_PANE_ID). Tests that need a pane id pass it explicitly
+    // via the `env` slice below, which is applied *after* the removes.
+    cmd.env_remove("CLAUDE_PANE_ID");
+    cmd.env_remove("OMUX_PANE_ID");
     for (k, v) in env {
         cmd.env(k, v);
     }
