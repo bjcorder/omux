@@ -14,8 +14,12 @@ automated by [`.github/workflows/release.yml`](./.github/workflows/release.yml).
 
 ```sh
 cargo install cargo-release            # local version-bump + tag + push tooling
-cargo install --locked slsa-verifier   # optional, for verifying after publish
 sudo pacman -S github-cli              # or your distro equivalent; for gh release download
+
+# slsa-verifier is a Go binary (not on crates.io). Pick one:
+go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@latest
+# …or a prebuilt binary from https://github.com/slsa-framework/slsa-verifier/releases
+# …or from the AUR (e.g. `paru -S slsa-verifier`).
 ```
 
 You also need:
