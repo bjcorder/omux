@@ -31,3 +31,16 @@ webkit6 = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Per-crate cargo-release rules. We put the CHANGELOG rewrite here
+# (not in the workspace-level release.toml) because cargo-release
+# resolves replacement paths relative to each crate's directory.
+# Scoping the rule to `omux` only — with `../CHANGELOG.md` to reach
+# back up to the workspace root — keeps the replacement single-firing
+# and points it at the actual file. The omux-hook crate inherits the
+# shared version via `version.workspace = true` and doesn't need its
+# own block.
+[package.metadata.release]
+pre-release-replacements = [
+  { file = "../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] — {{date}}", exactly = 1 },
+]

@@ -28,13 +28,20 @@ tag-name = "v{{version}}"
 tag-message = "Release {{tag_name}}"
 pre-release-commit-message = "chore: release {{version}}"
 
-# Rewrite the [Unreleased] heading to [{version}] — YYYY-MM-DD and
-# leave a fresh [Unreleased] heading at the top for future work.
-pre-release-replacements = [
-  { file = "CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] — {{date}}", exactly = 1 },
-]
-
 # Pre-release hook: must pass before the version bump commit is made.
 # Keep this fast — anything slow belongs in CI, not in the local
 # release path.
 pre-release-hook = ["cargo", "test", "--workspace", "--locked"]
+
+# NOTE on CHANGELOG.md:
+#
+# cargo-release resolves `pre-release-replacements` paths relative to
+# each crate's directory, not the workspace root. With our single
+# workspace-level CHANGELOG.md, defining the replacement here would
+# make cargo-release look for `omux/CHANGELOG.md` and
+# `omux-hook/CHANGELOG.md` and fail.
+#
+# Instead, the CHANGELOG-rewrite rule lives in `omux/Cargo.toml`
+# under [package.metadata.release], pointing at `../CHANGELOG.md`.
+# The omux-hook crate has no replacements and shares the version
+# via `version.workspace = true`.
