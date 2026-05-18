@@ -137,9 +137,56 @@ libadwaita 1.7+, WebKitGTK 6.0, VTE 4.
   `cargo build` from source. Push artifacts and CI live wherever the
   user eventually pushes the repository.
 
-### Stats
+### Post-v1 stabilization (after live smoke testing)
 
-- 16 commits on `main`.
+A round of bug fixes + UX additions found while driving the live
+app with kdotool + ydotool on a KDE Plasma Wayland session.
+
+- **Pane registry reconcile** — new panes from splits / `Ctrl+T` /
+  `Ctrl+Shift+B` weren't registered for hook routing until the next
+  workspace switch. The 250 ms badge timer now also reconciles the
+  registry, so any pane gets routable within one tick of creation.
+- **Capture-phase keyboard shortcuts** — the window-level
+  `ShortcutController` defaulted to bubble phase, which let VTE eat
+  every `Ctrl+Shift+*` / `Ctrl+T` / `Ctrl+W` keystroke before it
+  reached the shortcut handler. Switched to capture phase.
+- **Multi-live PaneTree per workspace** — switching workspaces used
+  to rebuild the target tree from snapshot every time, killing
+  every running shell and resetting the cwd. `AppShell.trees` is
+  now a `HashMap<String, PaneTree>`; each opened workspace stays
+  alive for the lifetime of the app.
+- **Per-leaf `+` button** — `gtk::Notebook` action widget at the
+  right end of each tab bar opens a popover with **New tab →
+  Terminal / Browser** and **Split this pane → Side-by-side /
+  Top-bottom**. Per-leaf `gio::SimpleActionGroup` so each leaf's
+  button targets itself.
+- **Per-tab `×` close button** — clicking removes the tab. If it
+  was the last tab in a non-root leaf, `collapse_leaf` re-parents
+  the sibling subtree into the grandparent (or the root bin) so
+  the empty leaf goes away. The workspace-root leaf refuses to
+  empty.
+- **Resizable sidebar** — `adw::OverlaySplitView` → `gtk::Paned`
+  so the divider is user-draggable. Width persists across restarts
+  via a new generic `app_state_get`/`app_state_set` k/v store on
+  the SQLite state DB.
+- **Clean shutdown** — `cleanup_runtime_state` is now wired to
+  `Application::connect_shutdown` (in addition to SIGINT/SIGTERM
+  handlers) so the control socket is removed on normal window
+  close, not just on signals.
+- **Install scripts** — `scripts/install.sh` / `scripts/uninstall.sh`
+  drop binaries into `~/.local/bin` (or `/usr/local/bin` with
+  `--system`), `.desktop` entry into the XDG applications dir, and
+  the SVG icon into the hicolor icon theme.
+- **Two `RefCell` panics caught in dialogs** — `match
+  manager.borrow_mut().upsert(cfg) { Ok(()) => switch_workspace
+  (...) }` and the `if let Err … else` rename path both kept the
+  scrutinee RefMut alive across the whole expression by Rust's
+  temporary-lifetime rule, conflicting with later `manager
+  .borrow()` calls. Hoisted both into `let`-bindings.
+
+### Stats (current)
+
+- 23 commits on `main`.
 - 52 automated tests pass (44 in `omux`, 8 in `omux-hook`).
-- `cargo build --release` produces a 5.3 MB `omux` binary and a 451 KB
+- `cargo build --release` produces a 5.4 MB `omux` binary and a 452 KB
   `omux-hook` helper.
