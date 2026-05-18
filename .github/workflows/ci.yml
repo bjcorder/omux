@@ -1,0 +1,66 @@
+name: ci
+
+# CI runs on every PR and every push to main. No untrusted inputs
+# (no issue/PR titles or bodies are interpolated into `run:` blocks).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel superseded PR runs; let main-branch runs finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: fmt + clippy + test + build
+    runs-on: ubuntu-24.04
+    # Arch container so we have GTK 4.18+ / WebKitGTK 6 / VTE 4 (gtk4
+    # build) at versions gtk4-rs 0.10 demands. Ubuntu 24.04's GTK is
+    # 4.14.5, which gtk4-sys rejects at build time.
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed \
+            gtk4 \
+            libadwaita \
+            webkitgtk-6.0 \
+            vte4 \
+            sqlite \
+            pkgconf \
+            gcc \
+            git \
+            curl \
+            ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: cargo build (debug smoke)
+        run: cargo build --workspace --locked

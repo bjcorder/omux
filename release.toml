@@ -1,0 +1,40 @@
+# cargo-release workspace config.
+#
+# Invoke with:
+#
+#   cargo release patch --execute    # 0.1.0 -> 0.1.1
+#   cargo release minor --execute    # 0.1.0 -> 0.2.0
+#   cargo release major --execute    # 0.1.0 -> 1.0.0
+#
+# Dry-run first:
+#
+#   cargo release minor --dry-run
+#
+# See `docs/RELEASING.md` for the end-to-end runbook.
+
+allow-branch = ["main"]
+
+# We're not on crates.io. Skip publish; do push the tag.
+publish = false
+push = true
+push-remote = "origin"
+
+# Don't require GPG signing locally. (CI re-signs artifacts via
+# Sigstore as part of SLSA provenance.)
+sign-tag = false
+sign-commit = false
+
+tag-name = "v{{version}}"
+tag-message = "Release {{tag_name}}"
+pre-release-commit-message = "chore: release {{version}}"
+
+# Rewrite the [Unreleased] heading to [{version}] — YYYY-MM-DD and
+# leave a fresh [Unreleased] heading at the top for future work.
+pre-release-replacements = [
+  { file = "CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] — {{date}}", exactly = 1 },
+]
+
+# Pre-release hook: must pass before the version bump commit is made.
+# Keep this fast — anything slow belongs in CI, not in the local
+# release path.
+pre-release-hook = ["cargo", "test", "--workspace", "--locked"]

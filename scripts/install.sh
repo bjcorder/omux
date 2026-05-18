@@ -11,7 +11,28 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Two supported layouts:
+#   (a) Running from a git checkout (scripts/install.sh next to a
+#       repo root with Cargo.toml). Binaries get built fresh.
+#   (b) Running from an extracted release tarball, where install.sh
+#       sits next to the prebuilt omux + omux-hook binaries. No
+#       cargo build needed.
+if [[ -x "$SCRIPT_DIR/omux" && -x "$SCRIPT_DIR/omux-hook" ]]; then
+    LAYOUT="tarball"
+    REPO_DIR="$SCRIPT_DIR"
+    OMUX_BIN="$SCRIPT_DIR/omux"
+    HOOK_BIN="$SCRIPT_DIR/omux-hook"
+    DESKTOP_FILE="$SCRIPT_DIR/omux.desktop"
+    ICON_FILE="$SCRIPT_DIR/omux.svg"
+else
+    LAYOUT="repo"
+    REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    OMUX_BIN="$REPO_DIR/target/release/omux"
+    HOOK_BIN="$REPO_DIR/target/release/omux-hook"
+    DESKTOP_FILE="$REPO_DIR/omux/resources/omux.desktop"
+    ICON_FILE="$REPO_DIR/omux/resources/omux.svg"
+fi
 
 MODE="user"
 SKIP_BUILD=0
@@ -26,12 +47,18 @@ Usage: $0 [--system] [--skip-build]
   --system      install to /usr/local + /usr/share (needs sudo).
                 Default is user-local under ~/.local.
   --skip-build  skip 'cargo build --release'; use existing binaries.
+                (Implied when running from an extracted tarball.)
 EOF
             exit 0
             ;;
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
+
+# Tarball layout always skips the build.
+if [[ "$LAYOUT" == "tarball" ]]; then
+    SKIP_BUILD=1
+fi
 
 if [[ "$MODE" == "system" ]]; then
     PREFIX="/usr/local"
@@ -53,6 +80,7 @@ DESKTOP_DIR="$SHARE/applications"
 ICON_DIR="$SHARE/icons/hicolor/scalable/apps"
 
 echo "==> omux installer"
+echo "    layout:     $LAYOUT"
 echo "    mode:       $MODE"
 echo "    binaries:   $BIN_DIR"
 echo "    desktop:    $DESKTOP_DIR"
@@ -64,10 +92,11 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     (cd "$REPO_DIR" && cargo build --release --workspace)
 fi
 
-OMUX_BIN="$REPO_DIR/target/release/omux"
-HOOK_BIN="$REPO_DIR/target/release/omux-hook"
 if [[ ! -x "$OMUX_BIN" || ! -x "$HOOK_BIN" ]]; then
-    echo "error: release binaries not found. Run 'cargo build --release' first." >&2
+    echo "error: release binaries not found at:" >&2
+    echo "  $OMUX_BIN" >&2
+    echo "  $HOOK_BIN" >&2
+    echo "Run 'cargo build --release' first, or extract a release tarball." >&2
     exit 1
 fi
 
@@ -76,11 +105,10 @@ $SUDO install -Dm755 "$OMUX_BIN" "$BIN_DIR/omux"
 $SUDO install -Dm755 "$HOOK_BIN" "$BIN_DIR/omux-hook"
 
 echo "==> install icon"
-$SUDO install -Dm644 "$REPO_DIR/omux/resources/omux.svg" "$ICON_DIR/omux.svg"
+$SUDO install -Dm644 "$ICON_FILE" "$ICON_DIR/omux.svg"
 
 echo "==> install desktop file"
-$SUDO install -Dm644 "$REPO_DIR/omux/resources/omux.desktop" \
-    "$DESKTOP_DIR/omux.desktop"
+$SUDO install -Dm644 "$DESKTOP_FILE" "$DESKTOP_DIR/omux.desktop"
 
 echo "==> refresh desktop + icon caches"
 if command -v update-desktop-database >/dev/null 2>&1; then

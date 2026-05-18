@@ -8,7 +8,7 @@ edition = "2024"
 license = "MIT"
 authors = ["bcorder <bjcorder@protonmail.com>"]
 rust-version = "1.85"
-repository = "https://github.com/bcorder/omux"
+repository = "https://github.com/bjcorder/omux"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -28,3 +28,10 @@ serde_json = "1"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Workspace is release-managed via `cargo-release`. Config lives in
+# the top-level `release.toml`; this stub documents the relationship
+# so `cargo metadata` consumers can discover it.
+[workspace.metadata.release]
+shared-version = true
+allow-branch = ["main"]
