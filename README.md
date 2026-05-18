@@ -7,6 +7,13 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/bjcorder/omux/actions/workflows/ci.yml"><img alt="ci" src="https://github.com/bjcorder/omux/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/bjcorder/omux/releases/latest"><img alt="latest release" src="https://img.shields.io/github/v/release/bjcorder/omux?display_name=tag&sort=semver"></a>
+  <a href="https://slsa.dev"><img alt="SLSA Build L3" src="https://slsa.dev/images/gh-badge-level3.svg"></a>
+  <a href="./LICENSE"><img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
+
+<p align="center">
   Inspired by
   <a href="https://github.com/manaflow-ai/cmux">cmux</a> (macOS) and
   <a href="https://github.com/am-will/limux">limux</a> (Linux), but
@@ -75,6 +82,38 @@ verified via the manual smoke checklist in [`PROGRESS.md`](./PROGRESS.md).
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the per-milestone breakdown.
 
+## Releases
+
+Prebuilt binaries + provenance attestations are published on the
+[GitHub releases page](https://github.com/bjcorder/omux/releases).
+Each release contains:
+
+- `omux-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` — release binaries +
+  `.desktop` + icon + `install.sh` + LICENSE + README. Dynamically
+  linked; install the system packages listed under *Build from
+  source* below.
+- `omux-X.Y.Z-source.tar.gz` — clean source tree of the tag.
+- `*.tar.gz.sha256` — SHA256 sidecar for each tarball.
+- `omux-X.Y.Z.intoto.jsonl` — **SLSA Build Level 3** in-toto
+  attestation, Sigstore-signed and logged in
+  [Rekor](https://search.sigstore.dev/).
+
+### Verify before you run
+
+```sh
+TAG=v0.1.0   # the release you want
+gh release download "$TAG" -R bjcorder/omux \
+    -p '*.tar.gz' -p '*.intoto.jsonl'
+slsa-verifier verify-artifact \
+    --provenance-path "omux-${TAG#v}.intoto.jsonl" \
+    --source-uri      github.com/bjcorder/omux \
+    --source-tag      "$TAG" \
+    "omux-${TAG#v}-x86_64-unknown-linux-gnu.tar.gz"
+```
+
+See [`docs/VERIFYING.md`](./docs/VERIFYING.md) for the full walk-through
+(what this proves, what it doesn't, what to do on failure).
+
 ## Quick install
 
 ```sh
@@ -83,7 +122,7 @@ cd omux
 ./scripts/install.sh
 ```
 
-This builds `cargo build --release` and drops `omux` + `omux-hook`
+This runs `cargo build --release` and drops `omux` + `omux-hook`
 into `~/.local/bin/`, a `.desktop` entry into
 `~/.local/share/applications/`, and an icon into
 `~/.local/share/icons/hicolor/scalable/apps/`. After it finishes,
@@ -92,6 +131,11 @@ is on your PATH).
 
 Pass `--system` for a `/usr/local` + `/usr/share` install (needs
 sudo). To remove: `./scripts/uninstall.sh` (preserves config + state).
+
+The same `install.sh` ships inside the release tarball. If you
+extract the tarball and run `./install.sh` from inside it, the
+script skips the cargo build and just copies the pre-built binaries
+into place.
 
 ## Build from source
 
@@ -325,6 +369,20 @@ without needing a GTK display.
 GTK widgets aren't covered by automated tests (CI can't easily run a
 real display); the manual smoke checklist in `PROGRESS.md` covers
 the UI interactions.
+
+## Contributing
+
+PRs welcome. Conventional commits are required (`cargo-release` and
+the release notes pipeline parse the subject lines). See
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) for the format. Maintainers
+cutting a release should follow [`docs/RELEASING.md`](./docs/RELEASING.md).
+
+## Security
+
+See [`SECURITY.md`](./SECURITY.md) for the threat model and how to
+privately report a vulnerability. Release artifacts carry SLSA L3
+provenance; see [`docs/VERIFYING.md`](./docs/VERIFYING.md) for how to
+verify them before running.
 
 ## License
 

@@ -1,0 +1,188 @@
+name: release
+
+# Triggered by `git push` of a tag matching v*. The local trigger
+# upstream is `cargo release patch|minor|major --execute`, which
+# creates the tag from the workspace version and pushes it.
+#
+# Hygiene: every `run:` step that needs a tag, version, or filename
+# reads the value through an `env:` block — never via direct ${{ }}
+# interpolation. Git tag names are syntactically restricted, but
+# treating them as untrusted is the cheap, correct posture.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Default-deny. Every job re-grants only the permissions it needs.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build release artifacts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+      version: ${{ steps.version.outputs.version }}
+      binary-tarball: ${{ steps.names.outputs.binary-tarball }}
+      source-tarball: ${{ steps.names.outputs.source-tarball }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # required for `git archive`
+
+      - name: Derive version from tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${REF_NAME#v}"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Compute artifact names
+        id: names
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          printf 'binary-tarball=omux-%s-x86_64-unknown-linux-gnu.tar.gz\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          printf 'source-tarball=omux-%s-source.tar.gz\n' "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install GTK4 + WebKitGTK 6 + VTE 4 system packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libwebkitgtk-6.0-dev \
+            libvte-2.91-gtk4-dev \
+            libsqlite3-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --workspace --release --locked
+
+      - name: Assemble binary tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          stage="omux-${VERSION}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${stage}"
+          cp target/release/omux         "dist/${stage}/"
+          cp target/release/omux-hook    "dist/${stage}/"
+          cp omux/resources/omux.desktop "dist/${stage}/"
+          cp omux/resources/omux.svg     "dist/${stage}/"
+          cp scripts/install.sh          "dist/${stage}/"
+          cp LICENSE README.md           "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          rm -rf "dist/${stage}"
+
+      - name: Assemble source tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          src="omux-${VERSION}-source"
+          git archive --format=tar.gz --prefix="${src}/" \
+            -o "dist/${src}.tar.gz" "${REF_NAME}"
+
+      - name: Generate sha256 sidecars
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for f in *.tar.gz; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
+      - name: Compute SLSA subjects (base64 of `sha256sum *.tar.gz`)
+        id: hash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          hashes="$(sha256sum *.tar.gz | base64 -w0)"
+          printf 'hashes=%s\n' "$hashes" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts to workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  provenance:
+    name: Generate SLSA L3 provenance
+    needs: [build]
+    permissions:
+      actions: read       # read the workflow run for provenance
+      id-token: write     # mint the Sigstore OIDC token
+      contents: write     # attach the .intoto.jsonl to the release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.hashes }}
+      upload-assets: true
+      provenance-name: omux-${{ needs.build.outputs.version }}.intoto.jsonl
+
+  release:
+    name: Publish GitHub release
+    needs: [build, provenance]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (for CHANGELOG)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Pull the section between '## [X.Y.Z]' and the next '## ['.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { capture=1; next }
+            capture && /^## \[/      { exit }
+            capture                  { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            {
+              echo "Release **${VERSION}**."
+              echo
+              echo "No curated notes were found in CHANGELOG.md for this version."
+            } > release-notes.md
+          fi
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: omux ${{ needs.build.outputs.version }}
+          body_path: release-notes.md
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true

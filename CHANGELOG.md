@@ -5,6 +5,32 @@ All notable changes to omux.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres loosely to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — release infrastructure
+
+- GitHub Actions `ci` workflow: fmt + clippy + test + build on every
+  PR and push to main (Ubuntu 24.04, full GTK4 + WebKitGTK 6 + VTE 4
+  toolchain).
+- GitHub Actions `release` workflow: triggered by `v*` tag push,
+  builds `omux-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` +
+  `omux-X.Y.Z-source.tar.gz`, computes SHA256 sidecars, generates
+  **SLSA Build Level 3** provenance via
+  [`slsa-framework/slsa-github-generator`](https://github.com/slsa-framework/slsa-github-generator)
+  (Sigstore-signed, Rekor-logged), publishes a GitHub release.
+- `cargo-release` configuration (`release.toml`) wired to bump the
+  workspace version, rewrite `CHANGELOG.md` `[Unreleased]` → versioned
+  heading, commit + tag + push.
+- Release runbook at `docs/RELEASING.md`, consumer verification guide
+  at `docs/VERIFYING.md` covering `slsa-verifier` usage end-to-end.
+- `SECURITY.md` with supported-versions table, private vulnerability
+  report channel, and threat model.
+- `CONTRIBUTING.md` documenting conventional-commit format + release
+  link.
+- `install.sh` now also runs against an extracted release tarball
+  (detects whether it's sitting next to the binaries or inside a
+  source tree).
+
 ## [0.0.1] — Unreleased
 
 First implementation pass. All M0–M6 milestones from
