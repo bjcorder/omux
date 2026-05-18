@@ -14,10 +14,17 @@
 
 allow-branch = ["main"]
 
-# We're not on crates.io. Skip publish; do push the tag.
+# We're not on crates.io. Skip publish.
 publish = false
-push = true
-push-remote = "origin"
+
+# Don't auto-push. `main` is branch-protected (changes must go via
+# pull request), so cargo-release pushing directly would always be
+# rejected. Workflow: cargo-release creates the version-bump commit
+# and the `vX.Y.Z` tag locally; the maintainer moves them to a
+# `release/vX.Y.Z` branch, opens a PR, merges via rebase (or merge
+# commit — NEVER squash, which would orphan the tag), and pushes
+# the tag manually after merge. Full procedure in `RELEASING.md`.
+push = false
 
 # Don't require GPG signing locally. (CI re-signs artifacts via
 # Sigstore as part of SLSA provenance.)

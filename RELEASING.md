@@ -89,7 +89,7 @@ much higher than the cost of looking at a dry-run twice.
 
 ---
 
-## Step 4 — Cut the release
+## Step 4 — Cut the release locally
 
 ```sh
 cargo release minor --execute        # same bump as the dry-run
@@ -104,13 +104,73 @@ cargo release minor --execute        # same bump as the dry-run
 | 3 | Rewrite `CHANGELOG.md` | `## [Unreleased]` → `## [Unreleased]` + new `## [X.Y.Z] — YYYY-MM-DD`. |
 | 4 | Commit | Message: `chore: release X.Y.Z`. |
 | 5 | Tag | Annotated, named `vX.Y.Z`, message `Release vX.Y.Z`. |
-| 6 | Push to `origin` | Commit + tag, in one `git push`. |
+| 6 | Push to `origin` | **Skipped.** We have `push = false` in `release.toml` because `main` is branch-protected (changes must go via PR). The commit + tag are now local-only; Step 5 moves them through the PR flow. |
 
-**You stop touching things now.** The tag push fires `release.yml` on GitHub.
+You now have **one local commit + one local tag**, both sitting on the tip of your local `main`. Neither is on `origin` yet.
 
 ---
 
-## Step 5 — Watch CI
+## Step 5 — Move the release commit to a branch + open a PR
+
+`main` requires PRs, so we move the release commit to a short-lived branch, then open a PR. The local tag stays put — we'll push it manually after the PR merges.
+
+```sh
+# Capture the version cargo-release just produced.
+VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+
+# Create release/vX.Y.Z at the release commit (tip of local main).
+git branch "release/v${VERSION}"
+
+# Reset local main back to origin/main. The release commit lives on
+# release/v* now; the v${VERSION} tag still points at it.
+git reset --hard origin/main
+
+# Push the release branch and open the PR.
+git switch "release/v${VERSION}"
+git push -u origin "release/v${VERSION}"
+
+gh pr create --base main --head "release/v${VERSION}" \
+    --title "chore: release ${VERSION}" \
+    --body "Release commit + local v${VERSION} tag. **Merge with 'Rebase and merge' or 'Create a merge commit' — NOT squash** (the tag SHA must remain reachable from main)."
+```
+
+---
+
+## Step 6 — Merge the PR (rebase OR merge commit, NEVER squash)
+
+Branch protection forces a PR; the **merge method matters**.
+
+The local `vX.Y.Z` tag points at the release commit's SHA. After merge, that SHA needs to be reachable from `main` so the release workflow (which checks out the tag) sees the bumped `Cargo.toml`.
+
+- ✅ **Rebase and merge** (with `main` unmoved during the PR) — GitHub fast-forwards `main` to the release commit. Same SHA. Tag stays valid.
+- ✅ **Create a merge commit** — the release commit becomes a parent of the merge commit. Same SHA, still reachable from `main`. Tag stays valid.
+- ❌ **Squash and merge** — GitHub creates a new commit with a different SHA. The original release commit is unreachable from `main`; the tag points at an orphan. Tag-triggered workflow may run but `main` doesn't reflect the bump → **the next release will conflict**. **Do not use this.**
+
+If you're the only one merging things, "Rebase and merge" is the cleanest — `main` ends up with a linear history and the same SHA your tag points at.
+
+---
+
+## Step 7 — Push the tag
+
+After the PR is merged:
+
+```sh
+git switch main
+git pull --ff-only
+
+# Sanity check: the v${VERSION} commit should be reachable from main.
+git merge-base --is-ancestor "v${VERSION}" main \
+    && echo "tag commit reachable from main, ok to push" \
+    || { echo "TAG ORPHANED — did someone squash-merge?"; exit 1; }
+
+git push origin "v${VERSION}"
+```
+
+The tag push fires `release.yml`.
+
+---
+
+## Step 8 — Watch CI
 
 Open [the release workflow page](https://github.com/bjcorder/omux/actions/workflows/release.yml).
 The run for your tag has three jobs:
@@ -127,7 +187,7 @@ attestation lands — that's expected; the `provenance` job appends the
 
 ---
 
-## Step 6 — Verify what you shipped
+## Step 9 — Verify what you shipped
 
 Don't skip this. CI green doesn't mean the artifacts work; this is the only
 real end-to-end check. Run on a different machine if you can (or at least a
@@ -233,6 +293,20 @@ trailing `.git`).
 - Working tree has uncommitted changes (clean it up; don't pass `--allow-dirty`).
 - Your local `main` is behind `origin/main` (pull first).
 
+**`! [remote rejected] main -> main (push declined due to repository rule violations)`:**
+`push = true` got re-enabled in `release.toml`. Branch protection requires PRs;
+revert that change, and follow Step 5 to move the release commit onto a
+`release/vX.Y.Z` branch.
+
+**Tag-triggered `release.yml` ran but the release page shows the old version:**
+the release PR was probably **squash-merged**, which gave the release commit
+a new SHA on `main` — but the tag still points at the local (now-orphaned)
+commit. The workflow checks out the orphan, builds it, and uploads correct
+artifacts, but `main` doesn't reflect the bump. To recover: delete the tag
+locally + remotely, delete the GitHub release, then bump `Cargo.toml` /
+`CHANGELOG.md` manually on `main` via a hotfix PR and re-tag against the
+merged commit.
+
 ---
 
 ## First-release special case (v0.1.0)
@@ -247,7 +321,7 @@ version marker that never got tagged or published:
    release notes already staged. Confirm it reads as the v0.1.0 release notes
    you want users to see.
 3. Run the standard procedure from Step 1 above.
-4. After it ships, do the Step 6 verification end-to-end **on a different
+4. After it ships, do the Step 9 verification end-to-end **on a different
    machine** if possible. If `slsa-verifier` prints `PASSED`, the pipeline is
    genuinely working — not just CI-green-by-luck.
 
@@ -260,9 +334,23 @@ version marker that never got tagged or published:
 git switch main && git pull --ff-only
 gh run list -R bjcorder/omux --workflow ci.yml --branch main --limit 1  # green?
 
-# Cut
+# Cut locally (no push — release.toml sets push = false)
 cargo release minor --dry-run
 cargo release minor --execute
+
+# Move commit to a branch + open PR
+VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+git branch "release/v${VERSION}"
+git reset --hard origin/main
+git switch "release/v${VERSION}"
+git push -u origin "release/v${VERSION}"
+gh pr create --base main --head "release/v${VERSION}" \
+    --title "chore: release ${VERSION}" \
+    --body "Merge with rebase / merge commit — NEVER squash."
+
+# After the PR is merged with rebase or merge commit (NOT squash):
+git switch main && git pull --ff-only
+git merge-base --is-ancestor "v${VERSION}" main && git push origin "v${VERSION}"
 
 # Watch (open in browser)
 gh run watch -R bjcorder/omux
