@@ -22,6 +22,10 @@ jobs:
   build:
     name: Build release artifacts
     runs-on: ubuntu-24.04
+    # Arch container so we get GTK 4.18+ / WebKitGTK 6 / VTE 4 at the
+    # versions gtk4-rs 0.10 demands. Ubuntu 24.04's GTK is 4.14.
+    container:
+      image: archlinux:latest
     permissions:
       contents: read
     outputs:
@@ -30,10 +34,33 @@ jobs:
       binary-tarball: ${{ steps.names.outputs.binary-tarball }}
       source-tarball: ${{ steps.names.outputs.source-tarball }}
     steps:
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed \
+            gtk4 \
+            libadwaita \
+            webkitgtk-6.0 \
+            vte4 \
+            sqlite \
+            pkgconf \
+            gcc \
+            git \
+            curl \
+            ca-certificates \
+            tar
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0   # required for `git archive`
+
+      - name: Mark workspace as a safe git directory
+        run: |
+          set -euo pipefail
+          # We run as root inside the container; without this git
+          # refuses to act on the runner-chowned workspace tree.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Derive version from tag
         id: version
@@ -52,18 +79,6 @@ jobs:
           set -euo pipefail
           printf 'binary-tarball=omux-%s-x86_64-unknown-linux-gnu.tar.gz\n' "$VERSION" >> "$GITHUB_OUTPUT"
           printf 'source-tarball=omux-%s-source.tar.gz\n' "$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Install GTK4 + WebKitGTK 6 + VTE 4 system packages
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libwebkitgtk-6.0-dev \
-            libvte-2.91-gtk4-dev \
-            libsqlite3-dev \
-            pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
