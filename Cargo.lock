@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "omux"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "omux-hook"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",

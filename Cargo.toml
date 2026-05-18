@@ -3,7 +3,7 @@ resolver = "2"
 members = ["omux", "omux-hook"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["bcorder <bjcorder@protonmail.com>"]
