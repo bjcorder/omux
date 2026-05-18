@@ -10,7 +10,7 @@
 #
 #   cargo release minor --dry-run
 #
-# See `docs/RELEASING.md` for the end-to-end runbook.
+# See `RELEASING.md` (top-level) for the end-to-end runbook.
 
 allow-branch = ["main"]
 

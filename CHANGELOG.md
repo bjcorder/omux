@@ -80,12 +80,11 @@ WebKitGTK 6.0, VTE 4.
   CHANGELOG's `[Unreleased]` heading, commits, tags `vX.Y.Z`, and
   pushes both. Pre-release hook runs `cargo test --workspace
   --locked` so a broken test halts the release before it gets a tag.
-- **Release docs**: maintainer runbook at
-  [`docs/RELEASING.md`](./docs/RELEASING.md), consumer verification
-  guide at [`docs/VERIFYING.md`](./docs/VERIFYING.md), security
-  policy and threat model in [`SECURITY.md`](./SECURITY.md),
-  conventional-commit guide in
-  [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+- **Release docs**: maintainer step-by-step at top-level
+  [`RELEASING.md`](./RELEASING.md), consumer verification guide at
+  [`docs/VERIFYING.md`](./docs/VERIFYING.md), security policy and
+  threat model in [`SECURITY.md`](./SECURITY.md), conventional-commit
+  guide in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **`install.sh` runs from either a git checkout or an extracted
   release tarball** — it detects which layout it's in and either
   builds with `cargo build --release` or just copies the prebuilt

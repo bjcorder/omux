@@ -86,7 +86,7 @@ end users, not for git archaeologists.
 ## Releases
 
 If you have merge rights and need to cut a release, see
-[`docs/RELEASING.md`](./docs/RELEASING.md). The TL;DR is:
+[`RELEASING.md`](./RELEASING.md). The TL;DR is:
 
 ```sh
 cargo release minor --execute
