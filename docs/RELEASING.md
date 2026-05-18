@@ -125,9 +125,11 @@ the old one for anyone fetching the latest release.
 job-level `permissions:` in `release.yml` got edited; check that the
 `provenance` job has `id-token: write`.
 
-**`build` job fails to find GTK headers:** the runner pin slipped
-back to `ubuntu-latest` (currently 22.04, which lacks WebKitGTK 6 in
-the main archive). Re-pin to `ubuntu-24.04`.
+**`build` job fails with `Package 'gtk4' has version 'X.Y.Z',
+required version is '>= 4.18'`:** the `container: archlinux:latest`
+block on the job was edited out, so it ran on the host runner.
+Ubuntu 24.04 ships GTK 4.14, below the gtk4-rs 0.10 floor. Restore
+the `container:` line; do not switch back to apt.
 
 **`Pre-release hook failed`:** `cargo test` is failing locally on
 your machine. Don't pass `--skip-pre-release-hook`. Fix the test
