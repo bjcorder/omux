@@ -7,6 +7,8 @@ and the project adheres loosely to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-05-18
+
 First end-to-end release of omux: a Linux-native multi-terminal
 workspace where panes light up when an AI coding agent finishes a
 turn or asks for input. Targets GTK 4.18+, libadwaita 1.7+,
