@@ -4,20 +4,24 @@
 //!
 //! * [`terminal::TerminalPane`] — VTE-backed shell with agent detection.
 //! * [`browser::BrowserPane`] — WebKitGTK web view with URL bar.
+//! * [`scratchpad::ScratchpadPane`] — ephemeral text notes.
 
 pub mod browser;
+pub mod scratchpad;
 pub mod terminal;
 pub mod tree;
 
 use gtk4 as gtk;
 
 use browser::BrowserPane;
+use scratchpad::ScratchpadPane;
 use terminal::TerminalPane;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneKind {
     Terminal,
     Browser,
+    Scratchpad,
 }
 
 /// A tab inside a leaf. Stored heterogeneously so the same `Vec<Pane>`
@@ -26,6 +30,7 @@ pub enum PaneKind {
 pub enum Pane {
     Terminal(TerminalPane),
     Browser(BrowserPane),
+    Scratchpad(ScratchpadPane),
 }
 
 impl Pane {
@@ -33,6 +38,7 @@ impl Pane {
         match self {
             Pane::Terminal(t) => t.widget(),
             Pane::Browser(b) => b.widget(),
+            Pane::Scratchpad(s) => s.widget(),
         }
     }
 
@@ -41,6 +47,7 @@ impl Pane {
         match self {
             Pane::Terminal(_) => PaneKind::Terminal,
             Pane::Browser(_) => PaneKind::Browser,
+            Pane::Scratchpad(_) => PaneKind::Scratchpad,
         }
     }
 
@@ -51,13 +58,14 @@ impl Pane {
         match self {
             Pane::Terminal(t) => t.pane_id(),
             Pane::Browser(b) => b.pane_id(),
+            Pane::Scratchpad(s) => s.pane_id(),
         }
     }
 
     pub fn as_terminal(&self) -> Option<&TerminalPane> {
         match self {
             Pane::Terminal(t) => Some(t),
-            Pane::Browser(_) => None,
+            Pane::Browser(_) | Pane::Scratchpad(_) => None,
         }
     }
 
@@ -66,6 +74,7 @@ impl Pane {
         match self {
             Pane::Terminal(_) => "shell",
             Pane::Browser(_) => "web",
+            Pane::Scratchpad(_) => "note",
         }
     }
 
@@ -78,6 +87,9 @@ impl Pane {
             }
             Pane::Browser(b) => {
                 b.focus_url_bar();
+            }
+            Pane::Scratchpad(s) => {
+                s.focus_editor();
             }
         }
     }

@@ -81,3 +81,8 @@ button.leaf-add-tab:hover {
   padding: 2px 6px;
   margin: 0;
 }
+
+.scratchpad-pane textview {
+  background: @view_bg_color;
+  color: @view_fg_color;
+}

@@ -44,8 +44,10 @@ up an unread count. Focusing the pane clears all three.
 - **Embedded browser pane** (`Ctrl+Shift+B`) with per-workspace
   cookie isolation, URL bar, back/forward/reload. Useful for the
   localhost dev-server-next-to-the-agent flow.
-- **Per-leaf `+` menu** for adding a new terminal tab / browser tab,
-  or splitting the leaf, without learning the keyboard shortcuts.
+- **Ephemeral scratchpad tabs** (`Ctrl+Shift+N`) for notes that should
+  stay in memory while omux runs but reopen blank after restart.
+- **Per-leaf `+` menu** for adding a new terminal tab, browser tab,
+  scratchpad tab, or splitting the leaf without learning shortcuts.
 - **Per-tab `×` close button** that also collapses the leaf out of
   the tree if it was the last tab (only the root leaf refuses, to
   avoid empty workspaces).
@@ -206,6 +208,7 @@ have added since survives untouched.
 | `Ctrl + Shift + E` | Split focused leaf top/bottom (v-split) |
 | `Ctrl + T` | New terminal tab in focused leaf |
 | `Ctrl + Shift + B` | New browser tab in focused leaf |
+| `Ctrl + Shift + N` | New scratchpad tab in focused leaf |
 | `Ctrl + W` | Close current tab. If it was the last tab in a non-root leaf, the leaf collapses out of the tree. |
 | `Ctrl + Tab` / `Ctrl + Shift + Tab` | Cycle focus through leaves |
 | `Alt + Arrow` | Focus adjacent leaf in that direction |
@@ -215,9 +218,9 @@ have added since survives untouched.
 ## Mouse interactions
 
 - **Per-leaf `+` button** (right end of each tab bar) — opens a
-  popover with **New tab → Terminal / Browser** and **Split this
-  pane → Side-by-side / Top-bottom**. Clicking from leaf A targets
-  leaf A regardless of which leaf currently has focus.
+  popover with **New tab → Terminal / Browser / Scratchpad** and
+  **Split this pane → Side-by-side / Top-bottom**. Clicking from
+  leaf A targets leaf A regardless of which leaf currently has focus.
 - **Per-tab `×` button** — closes that tab; collapses the leaf if it
   was the last tab in a non-root leaf.
 - **Right-click on a terminal pane** — Copy / Paste / Clear /
@@ -242,7 +245,8 @@ Workspaces persist their state in two layers:
    kinds, and browser URLs are saved to
    `$XDG_CONFIG_HOME/omux/workspaces/<slug>.toml` on window close.
    Running shells aren't persistable (PTYs are kernel state), so
-   they get re-spawned in the same shape on next launch.
+   they get re-spawned in the same shape on next launch. Scratchpad
+   tabs restore in the same position with blank text buffers.
 
 Cookies / local storage / cache for browser panes are scoped
 per workspace (one `webkit6::NetworkSession` per workspace) so

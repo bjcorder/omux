@@ -36,6 +36,7 @@ impl Orientation {
 pub enum TabKind {
     Terminal,
     Browser,
+    Scratchpad,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +58,13 @@ impl TabSnapshot {
         Self {
             kind: TabKind::Browser,
             url,
+        }
+    }
+
+    pub fn scratchpad() -> Self {
+        Self {
+            kind: TabKind::Scratchpad,
+            url: None,
         }
     }
 }
@@ -155,6 +163,40 @@ mod tests {
         let s = toml::to_string(&root).unwrap();
         let back: LayoutNode = toml::from_str(&s).unwrap();
         assert_eq!(root, back);
+    }
+
+    #[test]
+    fn round_trip_scratchpad_tab_without_content() {
+        let root = LayoutNode::Leaf(LeafSnapshot {
+            id: Uuid::from_u128(9),
+            tabs: vec![TabSnapshot::scratchpad()],
+        });
+
+        let s = toml::to_string(&root).unwrap();
+
+        assert!(s.contains("kind = \"scratchpad\""));
+        assert!(!s.contains("content"));
+        let back: LayoutNode = toml::from_str(&s).unwrap();
+        assert_eq!(root, back);
+    }
+
+    #[test]
+    fn deserializes_scratchpad_tab_kind() {
+        let raw = r#"
+            kind = "leaf"
+            id = "00000000-0000-0000-0000-000000000001"
+            [[tabs]]
+            kind = "scratchpad"
+        "#;
+
+        let node: LayoutNode = toml::from_str(raw).unwrap();
+
+        let LayoutNode::Leaf(leaf) = node else {
+            panic!("expected leaf")
+        };
+        assert_eq!(leaf.tabs.len(), 1);
+        assert_eq!(leaf.tabs[0].kind, TabKind::Scratchpad);
+        assert_eq!(leaf.tabs[0].url, None);
     }
 
     #[test]

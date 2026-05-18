@@ -204,6 +204,10 @@ fn install_window_shortcuts(shell: &AppShell) {
         let shell = shell.handle();
         move || shell.with_active_tree(|tree| tree.new_browser_tab_in_focused(None))
     });
+    add_shortcut(&controller, "<Control><Shift>n", {
+        let shell = shell.handle();
+        move || shell.with_active_tree(|tree| tree.new_scratchpad_tab_in_focused())
+    });
     add_shortcut(&controller, "<Control>Tab", {
         let shell = shell.handle();
         move || shell.with_active_tree(|tree| tree.focus_next_leaf())
@@ -275,6 +279,13 @@ fn install_window_actions(shell: &AppShell) {
         shell_t.with_active_tree(|tree| tree.new_tab_in_focused());
     });
     window.add_action(&new_tab);
+
+    let new_scratchpad = gio::SimpleAction::new("new-scratchpad", None);
+    let shell_s = shell.handle();
+    new_scratchpad.connect_activate(move |_, _| {
+        shell_s.with_active_tree(|tree| tree.new_scratchpad_tab_in_focused());
+    });
+    window.add_action(&new_scratchpad);
 
     let close_tab = gio::SimpleAction::new("close-tab", None);
     let shell_c = shell.handle();

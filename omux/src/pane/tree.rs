@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 use super::Pane;
 use super::browser::BrowserPane;
+use super::scratchpad::ScratchpadPane;
 use super::terminal::TerminalPane;
 use crate::agent::manifest::CompiledManifest;
 use crate::agent::status::PaneStatus;
@@ -45,6 +46,7 @@ use webkit6::NetworkSession;
 ///   New tab
 ///     • Terminal
 ///     • Browser
+///     • Scratchpad
 ///   Split this pane
 ///     • Side-by-side  (h-split)
 ///     • Top / bottom  (v-split)
@@ -59,6 +61,7 @@ fn attach_new_tab_button(notebook: &Notebook) {
     let tab_section = gio::Menu::new();
     tab_section.append(Some("Terminal"), Some("leaf.new-terminal"));
     tab_section.append(Some("Browser"), Some("leaf.new-browser"));
+    tab_section.append(Some("Scratchpad"), Some("leaf.new-scratchpad"));
     menu.append_section(Some("New tab"), &tab_section);
 
     let split_section = gio::Menu::new();
@@ -246,6 +249,11 @@ impl Leaf {
         self.append_pane(pane);
     }
 
+    fn add_scratchpad_tab(&mut self) {
+        let pane = Pane::Scratchpad(ScratchpadPane::new());
+        self.append_pane(pane);
+    }
+
     fn add_tab_from_spec(
         &mut self,
         spec: &TabSnapshot,
@@ -255,6 +263,7 @@ impl Leaf {
         match spec.kind {
             TabKind::Terminal => self.add_terminal_tab(manifests),
             TabKind::Browser => self.add_browser_tab(session, spec.url.as_deref()),
+            TabKind::Scratchpad => self.add_scratchpad_tab(),
         }
     }
 
@@ -295,7 +304,7 @@ impl Leaf {
         for (pane, badge) in self.tabs.iter().zip(self.tab_badges.iter()) {
             let want_visible = match pane {
                 Pane::Terminal(t) => t.status() == PaneStatus::NeedsAttention,
-                Pane::Browser(_) => false,
+                Pane::Browser(_) | Pane::Scratchpad(_) => false,
             };
             if badge.is_visible() != want_visible {
                 badge.set_visible(want_visible);
@@ -309,6 +318,7 @@ impl Leaf {
             .map(|p| match p {
                 Pane::Terminal(_) => TabSnapshot::terminal(),
                 Pane::Browser(b) => TabSnapshot::browser(b.current_url()),
+                Pane::Scratchpad(_) => TabSnapshot::scratchpad(),
             })
             .collect()
     }
@@ -393,6 +403,18 @@ impl PaneTree {
         let state_weak = Rc::downgrade(&self.state);
         let mut add = |leaf: &mut Leaf| {
             leaf.add_browser_tab(&session, url);
+            wire_last_pane(leaf, &state_weak);
+        };
+        with_leaf_mut(&root_slot, target, &mut add);
+    }
+
+    /// Append a new scratchpad tab to the focused leaf.
+    pub fn new_scratchpad_tab_in_focused(&self) {
+        let target = self.state.borrow().focused;
+        let root_slot = self.state.borrow().root.clone();
+        let state_weak = Rc::downgrade(&self.state);
+        let mut add = |leaf: &mut Leaf| {
+            leaf.add_scratchpad_tab();
             wire_last_pane(leaf, &state_weak);
         };
         with_leaf_mut(&root_slot, target, &mut add);
@@ -776,6 +798,15 @@ fn install_leaf_actions(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
     });
     actions.add_action(&new_browser);
 
+    let state_for_scratchpad = state_weak.clone();
+    let new_scratchpad = gio::SimpleAction::new("new-scratchpad", None);
+    new_scratchpad.connect_activate(move |_, _| {
+        if let Some(state) = state_for_scratchpad.upgrade() {
+            add_scratchpad_tab_in_leaf(&state, leaf_id);
+        }
+    });
+    actions.add_action(&new_scratchpad);
+
     let state_for_h = state_weak.clone();
     let split_h = gio::SimpleAction::new("split-horizontal", None);
     split_h.connect_activate(move |_, _| {
@@ -849,11 +880,20 @@ fn add_browser_tab_in_leaf(state: &Rc<RefCell<TreeState>>, target: LeafId) {
     with_leaf_mut(&root_slot, target, &mut add);
 }
 
-/// Helper called after `add_terminal_tab` / `add_browser_tab` to attach
-/// focus tracking AND the close button click handler to the just-added
-/// pane. The leaf-level action group (for the `+` button) is per-leaf
-/// and was installed once at construction time, so it doesn't need
-/// re-installing here.
+fn add_scratchpad_tab_in_leaf(state: &Rc<RefCell<TreeState>>, target: LeafId) {
+    let root_slot = state.borrow().root.clone();
+    let state_weak = Rc::downgrade(state);
+    let mut add = |leaf: &mut Leaf| {
+        leaf.add_scratchpad_tab();
+        wire_last_pane(leaf, &state_weak);
+    };
+    with_leaf_mut(&root_slot, target, &mut add);
+}
+
+/// Helper called after adding a tab to attach focus tracking AND the
+/// close button click handler to the just-added pane. The leaf-level
+/// action group (for the `+` button) is per-leaf and was installed once
+/// at construction time, so it doesn't need re-installing here.
 fn wire_last_pane(leaf: &Leaf, state_weak: &Weak<RefCell<TreeState>>) {
     let Some(p) = leaf.tabs.last() else { return };
     install_focus_tracking(p, leaf.id, state_weak);
